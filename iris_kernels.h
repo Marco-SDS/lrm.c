@@ -144,6 +144,18 @@ void iris_batch_norm(float *out, const float *x,
                      const float *gamma, const float *beta,
                      int batch, int channels, int H, int W, float eps);
 
+/*
+ * Layer Normalization with affine params.
+ * Normalizes over the last dimension (`hidden`) per row, then applies the
+ * affine transform `gamma * normalized + beta`. Pass NULL for either gamma
+ * or beta to skip that part of the affine. Used by DINO ViT (12 LayerNorms
+ * per block) and the TripoSR triplane decoder.
+ * x: [seq_len, hidden], gamma: [hidden] or NULL, beta: [hidden] or NULL
+ */
+void iris_layer_norm(float *out, const float *x,
+                     const float *gamma, const float *beta,
+                     int seq_len, int hidden, float eps);
+
 /* ========================================================================
  * Activation Functions
  * ======================================================================== */
@@ -154,9 +166,46 @@ void iris_silu(float *x, int n);
 /* Fused SiLU(gate) * up - single pass for SwiGLU */
 void iris_silu_mul(float *gate, const float *up, int n);
 
+/* Exact GELU activation: 0.5 * x * (1 + erf(x / sqrt(2))). Inplace.
+ * Used by DINO ViT MLP. Note: this is the *exact* form, not the tanh
+ * approximation used elsewhere. */
+void iris_gelu(float *x, int n);
+
+/* GEGLU activation: out[i] = hidden[i] * gelu(gate[i]).
+ * Used by the TripoSR triplane decoder FFN. Diffusers' BasicTransformerBlock
+ * computes proj(x) -> [..., 2*dim], splits chunks (hidden, gate), then
+ * applies this kernel. Callers do the split via pointer arithmetic. */
+void iris_geglu(float *out, const float *hidden, const float *gate, int n);
+
 /* Softmax over last dimension */
 void iris_softmax(float *x, int rows, int cols);
 void iris_softmax_cpu(float *x, int rows, int cols);
+
+/* ========================================================================
+ * Spatial Sampling
+ * ======================================================================== */
+
+/*
+ * Bilinear grid_sample (PyTorch-compatible).
+ * For each of N_planes feature maps, samples N_points locations using
+ * bilinear interpolation. Grid coordinates are normalized [-1, +1] in
+ * (x=column, y=row) order. Uses padding_mode='border' (out-of-range
+ * coordinates clamp to the edge) and align_corners=False (so a normalized
+ * coordinate of -1 maps to half a pixel left of pixel 0).
+ *
+ * input:  [N_planes, C, H, W]
+ * grid:   [N_planes, N_points, 2]  -- (x, y) per point, normalized [-1, 1]
+ * out:    [N_planes, C, N_points]
+ *
+ * Used by the TripoSR triplane sampler (N_planes=3, C=40, H=W=64). At MC
+ * resolution 256, this kernel is called with N_points ~= 16.78M; it is
+ * the wall-clock bottleneck after the decoder. Phase 4 ships a clean CPU
+ * implementation; Phase 13 adds a tiled Metal version.
+ */
+void iris_grid_sample_bilinear(float *out, const float *input,
+                               const float *grid,
+                               int N_planes, int C, int H, int W,
+                               int N_points);
 
 /* ========================================================================
  * Attention Operations

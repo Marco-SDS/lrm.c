@@ -17,7 +17,7 @@
 static void print_version(void) {
     printf("lrm.c (fork of iris.c)\n");
     printf("  fork-target: LRM-family image-to-3D models (TripoSR first)\n");
-    printf("  status:      Phase 3 stub - lrm/ skeleton linked, API not yet implemented\n");
+    printf("  status:      Phase 4 stub - kernels in place, LRM API not yet implemented\n");
 }
 
 static void print_help(void) {

@@ -570,6 +570,53 @@ void iris_batch_norm(float *out, const float *x,
     }
 }
 
+/* Layer Normalization. Centers and scales each row over the `hidden`
+ * dimension, then optionally applies an affine transform. This is the
+ * standard LayerNorm used in ViT and most pre-LLaMA transformer designs.
+ * Numerically robust: mean is computed in fp32 sum, variance via the
+ * "naive" formula because input rows are short (<= 4096 for DINO/TripoSR)
+ * so catastrophic cancellation is not a concern. */
+void iris_layer_norm(float *out, const float *x,
+                     const float *gamma, const float *beta,
+                     int seq_len, int hidden, float eps) {
+    for (int s = 0; s < seq_len; s++) {
+        const float *x_row = x + s * hidden;
+        float *out_row = out + s * hidden;
+
+        /* mean */
+        float sum = 0.0f;
+        for (int i = 0; i < hidden; i++) sum += x_row[i];
+        float mean = sum / (float)hidden;
+
+        /* variance */
+        float sq = 0.0f;
+        for (int i = 0; i < hidden; i++) {
+            float d = x_row[i] - mean;
+            sq += d * d;
+        }
+        float std_inv = 1.0f / sqrtf(sq / (float)hidden + eps);
+
+        /* normalize + optional affine */
+        if (gamma && beta) {
+            for (int i = 0; i < hidden; i++) {
+                out_row[i] = (x_row[i] - mean) * std_inv * gamma[i] + beta[i];
+            }
+        } else if (gamma) {
+            for (int i = 0; i < hidden; i++) {
+                out_row[i] = (x_row[i] - mean) * std_inv * gamma[i];
+            }
+        } else if (beta) {
+            for (int i = 0; i < hidden; i++) {
+                out_row[i] = (x_row[i] - mean) * std_inv + beta[i];
+            }
+        } else {
+            for (int i = 0; i < hidden; i++) {
+                out_row[i] = (x_row[i] - mean) * std_inv;
+            }
+        }
+    }
+}
+
 /* ========================================================================
  * Activation Functions
  * ======================================================================== */
@@ -590,6 +637,32 @@ void iris_silu(float *x, int n) {
 }
 
 /* Fused SiLU(gate) * up in a single pass - avoids double memory traversal */
+/* Exact GELU activation: 0.5 * x * (1 + erf(x / sqrt(2))).
+ * Uses libm's erff. Slower than the tanh approximation but matches
+ * PyTorch's nn.GELU(approximate='none') bit-for-bit (to within libm
+ * precision). DINO's ViT MLP uses exact GELU, so we use exact here too. */
+void iris_gelu(float *x, int n) {
+    static const float kInvSqrt2 = 0.70710678118654752440f;
+    for (int i = 0; i < n; i++) {
+        float v = x[i];
+        x[i] = 0.5f * v * (1.0f + erff(v * kInvSqrt2));
+    }
+}
+
+/* GEGLU activation: out[i] = hidden[i] * gelu(gate[i]).
+ * Reads two input buffers (the caller has already split the proj output)
+ * and writes the gated result. Out-of-place so the caller doesn't have to
+ * worry about aliasing; `out == hidden` is allowed because we compute
+ * `out[i]` from `hidden[i]` and `gate[i]` only. */
+void iris_geglu(float *out, const float *hidden, const float *gate, int n) {
+    static const float kInvSqrt2 = 0.70710678118654752440f;
+    for (int i = 0; i < n; i++) {
+        float g = gate[i];
+        float g_act = 0.5f * g * (1.0f + erff(g * kInvSqrt2));
+        out[i] = hidden[i] * g_act;
+    }
+}
+
 void iris_silu_mul(float *gate, const float *up, int n) {
 #ifdef USE_METAL
     if (iris_metal_shaders_available() && n >= 4 * 1024 * 1024) {
@@ -640,6 +713,94 @@ void iris_softmax(float *x, int rows, int cols) {
     }
 #endif
     iris_softmax_cpu(x, rows, cols);
+}
+
+/* ========================================================================
+ * Spatial Sampling
+ * ======================================================================== */
+
+/* Bilinear grid_sample matching PyTorch's
+ *   F.grid_sample(mode='bilinear', padding_mode='border', align_corners=False).
+ *
+ * For each plane p in [0, N_planes), for each point n in [0, N_points):
+ *   - Read normalized (x, y) from grid[p, n, :].
+ *   - Map to pixel coords with align_corners=False:
+ *       px = (x + 1) * W / 2 - 0.5
+ *       py = (y + 1) * H / 2 - 0.5
+ *   - Border-clamp the pixel coords to [0, W-1] / [0, H-1].
+ *   - Compute the four enclosing integer corners (also clamped) and the
+ *     fractional weights, then blend bilinearly per channel.
+ *
+ * The clamp-then-floor order is important: clamping FIRST means a query
+ * outside [-1, 1] effectively reads the boundary pixel with zero gradient
+ * along the out-of-range axis, which is exactly what border padding does.
+ *
+ * Layout reminder: input is [planes, C, H, W] C-contiguous; output is
+ * [planes, C, N_points]. The hot loop is `for c in [0, C)` per point, so
+ * the channel axis is the innermost stride in the input (great for cache
+ * locality on the C dimension). */
+void iris_grid_sample_bilinear(float *out, const float *input,
+                               const float *grid,
+                               int N_planes, int C, int H, int W,
+                               int N_points) {
+    const int plane_stride = C * H * W;
+    const int channel_stride = H * W;
+    const int out_plane_stride = C * N_points;
+
+    for (int p = 0; p < N_planes; p++) {
+        const float *plane_in = input + p * plane_stride;
+        const float *plane_grid = grid + p * N_points * 2;
+        float *plane_out = out + p * out_plane_stride;
+
+        for (int n = 0; n < N_points; n++) {
+            float gx = plane_grid[n * 2 + 0];
+            float gy = plane_grid[n * 2 + 1];
+
+            /* normalized -> pixel space, align_corners=False */
+            float px = (gx + 1.0f) * 0.5f * (float)W - 0.5f;
+            float py = (gy + 1.0f) * 0.5f * (float)H - 0.5f;
+
+            /* border padding: clamp the fractional coord */
+            if (px < 0.0f) px = 0.0f;
+            if (py < 0.0f) py = 0.0f;
+            float maxx = (float)(W - 1);
+            float maxy = (float)(H - 1);
+            if (px > maxx) px = maxx;
+            if (py > maxy) py = maxy;
+
+            int x0 = (int)floorf(px);
+            int y0 = (int)floorf(py);
+            int x1 = x0 + 1;
+            int y1 = y0 + 1;
+            /* Neighbors can fall outside after floor (e.g. px is already
+             * at W-1); border-clamp them too. */
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > W - 1) x1 = W - 1;
+            if (y1 > H - 1) y1 = H - 1;
+
+            float dx = px - (float)x0;
+            float dy = py - (float)y0;
+            float w00 = (1.0f - dx) * (1.0f - dy);
+            float w10 = dx * (1.0f - dy);
+            float w01 = (1.0f - dx) * dy;
+            float w11 = dx * dy;
+
+            const float *row0_x0 = plane_in + y0 * W + x0;
+            const float *row0_x1 = plane_in + y0 * W + x1;
+            const float *row1_x0 = plane_in + y1 * W + x0;
+            const float *row1_x1 = plane_in + y1 * W + x1;
+
+            for (int c = 0; c < C; c++) {
+                float v00 = row0_x0[c * channel_stride];
+                float v10 = row0_x1[c * channel_stride];
+                float v01 = row1_x0[c * channel_stride];
+                float v11 = row1_x1[c * channel_stride];
+                plane_out[c * N_points + n] =
+                    w00 * v00 + w10 * v10 + w01 * v01 + w11 * v11;
+            }
+        }
+    }
 }
 
 /* ========================================================================

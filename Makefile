@@ -34,7 +34,7 @@ LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info pngtest help generic blas mps
+.PHONY: all clean debug lib install info pngtest test help generic blas mps
 .NOTPARALLEL: mps
 
 # Default: show available targets
@@ -54,6 +54,7 @@ endif
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make clean    - Remove build artifacts"
+	@echo "  make test     - Build and run the kernel parity tests"
 	@echo "  make pngtest  - Run the PNG codec comparison test"
 	@echo "  make info     - Show build configuration"
 	@echo "  make lib      - Build static library ($(LIB))"
@@ -143,6 +144,13 @@ debug: clean $(TARGET)
 # =============================================================================
 # Utilities
 # =============================================================================
+test:
+	@echo "Building kernel parity tests..."
+	@$(CC) $(CFLAGS_BASE) tests/test_kernels.c iris_kernels.c \
+	    -lm -o /tmp/lrm_test_kernels
+	@/tmp/lrm_test_kernels
+	@rm -f /tmp/lrm_test_kernels
+
 pngtest:
 	@echo "Running PNG compression compare test..."
 	@$(CC) $(CFLAGS_BASE) -I. png_compare.c iris_image.c iris.c -lm -o /tmp/lrm_png_compare
