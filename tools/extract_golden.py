@@ -277,6 +277,12 @@ def main() -> int:
     np.savez_compressed(GOLDEN_DIR / "input_512.npz", image=rgb_cond_np)
     np.savez_compressed(GOLDEN_DIR / "dino_tokens.npz", tokens=dino_tokens_np)
     np.savez_compressed(GOLDEN_DIR / "triplane.npz", triplane=triplane_np)
+    # Raw f32 .bin sidecars so the C parity tests don't have to parse zip/
+    # numpy headers. The .npz files are convenient for Python tooling and
+    # carry their shape implicitly; meta.json carries the shape for C.
+    rgb_cond_np.tofile(GOLDEN_DIR / "input_512.bin")
+    dino_tokens_np.tofile(GOLDEN_DIR / "dino_tokens.bin")
+    triplane_np.tofile(GOLDEN_DIR / "triplane.bin")
     np.savez_compressed(
         GOLDEN_DIR / "density_64.npz",
         density=density_grid,

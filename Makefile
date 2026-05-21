@@ -25,7 +25,7 @@ UNAME_M := $(shell uname -m)
 # binary is lrmc, library is liblrmc.a).
 
 INFRA_SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
-LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c
+LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c
 SRCS       = $(INFRA_SRCS) $(LRM_SRCS)
 OBJS       = $(SRCS:.c=.o)
 MAIN       = main.c
@@ -34,7 +34,7 @@ LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info pngtest test help generic blas mps
+.PHONY: all clean debug lib install info pngtest test test-dino help generic blas mps
 .NOTPARALLEL: mps
 
 # Default: show available targets
@@ -54,8 +54,9 @@ endif
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make clean    - Remove build artifacts"
-	@echo "  make test     - Build and run the kernel parity tests"
-	@echo "  make pngtest  - Run the PNG codec comparison test"
+	@echo "  make test       - Build and run the kernel parity tests"
+	@echo "  make test-dino  - Build and run the DINO ViT-B/16 parity test"
+	@echo "  make pngtest    - Run the PNG codec comparison test"
 	@echo "  make info     - Show build configuration"
 	@echo "  make lib      - Build static library ($(LIB))"
 	@echo ""
@@ -151,6 +152,15 @@ test:
 	@/tmp/lrm_test_kernels
 	@rm -f /tmp/lrm_test_kernels
 
+test-dino:
+	@echo "Building DINO ViT-B/16 parity test..."
+	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
+	    tests/test_vit_dino.c lrm/lrm_vit_dino.c lrm/lrm_triposr.c lrm/lrm.c \
+	    iris.c iris_kernels.c iris_image.c iris_safetensors.c jpeg.c \
+	    -framework Accelerate -lm -o /tmp/lrm_test_dino
+	@/tmp/lrm_test_dino
+	@rm -f /tmp/lrm_test_dino
+
 pngtest:
 	@echo "Running PNG compression compare test..."
 	@$(CC) $(CFLAGS_BASE) -I. png_compare.c iris_image.c iris.c -lm -o /tmp/lrm_png_compare
@@ -196,4 +206,5 @@ iris_image.o: iris_image.c iris.h jpeg.h
 iris_safetensors.o: iris_safetensors.c iris_safetensors.h
 lrm/lrm.o: lrm/lrm.c lrm/lrm.h lrm/lrm_triposr.h iris.h
 lrm/lrm_triposr.o: lrm/lrm_triposr.c lrm/lrm_triposr.h lrm/lrm.h iris.h iris_safetensors.h
+lrm/lrm_vit_dino.o: lrm/lrm_vit_dino.c lrm/lrm_vit_dino.h iris.h iris_kernels.h iris_safetensors.h
 main.o: main.c iris.h lrm/lrm.h lrm/lrm_triposr.h
