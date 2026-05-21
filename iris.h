@@ -75,6 +75,13 @@ iris_image *iris_image_resize(const iris_image *img, int new_width, int new_heig
  */
 const char *iris_get_error(void);
 
+/*
+ * Set the last-error string. Internal helper for engine code; callers do
+ * not need this. Pass NULL to clear the slot. The message is copied into
+ * a static buffer (~512 bytes) and truncated if longer.
+ */
+void iris_set_error(const char *msg);
+
 #ifdef __cplusplus
 }
 #endif

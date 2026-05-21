@@ -7,7 +7,8 @@
 #   make mps     - Apple Silicon Metal GPU (fastest, macOS arm64 only)
 
 CC = gcc
-CFLAGS_BASE = -Wall -Wextra -O3 -march=native -ffast-math
+# -I. lets sources under lrm/ include root headers (iris.h, iris_kernels.h).
+CFLAGS_BASE = -Wall -Wextra -O3 -march=native -ffast-math -I.
 LDFLAGS = -lm
 
 # Platform detection
@@ -15,17 +16,21 @@ UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
 # =============================================================================
-# Source files (post Phase 2 cleanup)
+# Source files
 # =============================================================================
-# All LRM-specific code will land under lrm/ in Phase 3+. For now, the build
-# is just generic infrastructure (kernels, image I/O, safetensors loader)
-# plus the main.c stub.
+# Root sources = generic infrastructure (kernels, image I/O, safetensors).
+# lrm/ subdirectory = LRM-specific code (skeleton in Phase 3; populated in
+# Phases 5-11). The binary is named ./lrmc to avoid the filesystem conflict
+# between a regular file ./lrm and a directory ./lrm/ (project name is lrm.c,
+# binary is lrmc, library is liblrmc.a).
 
-SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
-OBJS = $(SRCS:.c=.o)
-MAIN = main.c
-TARGET = lrm
-LIB = liblrm.a
+INFRA_SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
+LRM_SRCS   = lrm/lrm.c
+SRCS       = $(INFRA_SRCS) $(LRM_SRCS)
+OBJS       = $(SRCS:.c=.o)
+MAIN       = main.c
+TARGET     = lrmc
+LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
@@ -53,8 +58,8 @@ endif
 	@echo "  make info     - Show build configuration"
 	@echo "  make lib      - Build static library ($(LIB))"
 	@echo ""
-	@echo "Phase 2 stub: ./$(TARGET) just prints status; the LRM pipeline"
-	@echo "lands in Phase 3+. See LRMengine.md."
+	@echo "Phase 3 stub: ./$(TARGET) links lrm/ but the API is still empty;"
+	@echo "real implementations land in Phases 5-11. See LRMengine.md."
 
 # =============================================================================
 # Backend: generic (pure C, no BLAS)
@@ -156,7 +161,7 @@ install: $(TARGET) $(LIB)
 	install -m 644 iris_kernels.h /usr/local/include/
 
 clean:
-	rm -f $(OBJS) *.mps.o iris_metal.o main.o main.mps.o $(TARGET) $(LIB)
+	rm -f $(OBJS) $(SRCS:.c=.mps.o) iris_metal.o main.o main.mps.o $(TARGET) $(LIB)
 	rm -f iris_shaders_source.h
 
 info:
@@ -181,4 +186,5 @@ iris.o: iris.c iris.h
 iris_kernels.o: iris_kernels.c iris_kernels.h
 iris_image.o: iris_image.c iris.h jpeg.h
 iris_safetensors.o: iris_safetensors.c iris_safetensors.h
-main.o: main.c
+lrm/lrm.o: lrm/lrm.c lrm/lrm.h iris.h
+main.o: main.c iris.h lrm/lrm.h

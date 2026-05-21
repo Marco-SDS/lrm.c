@@ -15,9 +15,9 @@
 ```bash
 git clone https://github.com/<you>/lrm.c.git
 cd lrm.c
-make                                  # produces ./lrm (single ~3 MB binary)
-./lrm download triposr                # ~1.7 GB checkpoint, auto-converted to safetensors
-./lrm infer photo.png -o out.glb
+make generic                          # produces ./lrmc (single ~3 MB binary)
+./lrmc download triposr               # ~1.7 GB checkpoint, auto-converted to safetensors
+./lrmc infer photo.png -o out.glb
 # → out.glb (binary glTF 2.0 with vertex colors)
 ```
 
@@ -155,6 +155,12 @@ only with explicit justification.
 - **Threading.** Inherit iris.c's single-threaded-per-call model.
   Concurrency stays the caller's responsibility (OpenMP inside BLAS
   GEMM is fine).
+- **Binary name.** Project is `lrm.c`. Binary is `./lrmc` (the trailing
+  `c` echoes the "X.c → Xc" pattern: bison → ybacc-like). We picked
+  this in Phase 3 because the binary `./lrm` and the directory `./lrm/`
+  cannot coexist in the same parent on a POSIX filesystem, and the
+  directory name is the one referenced throughout the design. Static
+  library is `liblrmc.a`.
 - **Pin recommendations for parity reference:**
   - TripoSR repo @ `d26e33181947bbbc4c6fc0f5734e1ec6c080956e`
   - HF `stabilityai/TripoSR` @ `5b521936b01fbe1890f6f9baed0254ab6351c04a`
@@ -501,7 +507,7 @@ Each phase ends with a concrete, verifiable artifact and a passing test
 | **9** | Triplane sample + NeRF MLP | `lrm/lrm_triplane_sample.c` (grid_sample, border, align_corners=False) + `lrm/lrm_nerf_mlp.c` | parity vs `density_64.npz` (262K queries on 64³ grid) | 1 wk |
 | **10** | Marching cubes | `lrm/lrm_marching_cubes.c` (Lorensen–Cline 256-entry table) + vertex color re-query | parity vs golden mesh: vertices ±2%, faces ±2%, Chamfer < 1e-3 | 1.5 wk |
 | **11** | GLB export | Vendor `cgltf.h`, write `lrm/lrm_mesh_export.c` (vertex colors only) | GLB round-trip opens in Blender / online viewer | 3 d |
-| **12** | TripoSR glue + CLI | `lrm/lrm_triposr.c` config parsing, `main.c` subcommands `download / convert / infer / info` | `./lrm infer image.png -o out.glb` end-to-end | 1 wk |
+| **12** | TripoSR glue + CLI | `lrm/lrm_triposr.c` config parsing, `main.c` subcommands `download / convert / infer / info` | `./lrmc infer image.png -o out.glb` end-to-end | 1 wk |
 | **13** | Metal optimization | Targeted shaders for (a) decoder cross-attention (b) batched grid_sample (c) batched MLP over 256³ with early-termination on low-density voxels | benchmark e2e < 3 s on M-series, 512×512 input | 2 wk |
 | **14** | BLAS path validation | Run on Linux x86_64 without Metal, profile BLAS GEMM in decoder | end-to-end runs, e2e < 8 s | 4 d |
 | **15** | OpenLRM (optional) | Second model `lrm/lrm_openlrm.c`, validates the abstraction | OpenLRM golden parity | 1.5 wk |

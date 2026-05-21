@@ -2,7 +2,7 @@
 *.o
 
 # Compiled binaries
-lrm
+lrmc
 flux
 iris
 
