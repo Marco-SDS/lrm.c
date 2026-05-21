@@ -571,11 +571,12 @@ void iris_batch_norm(float *out, const float *x,
 }
 
 /* Layer Normalization. Centers and scales each row over the `hidden`
- * dimension, then optionally applies an affine transform. This is the
- * standard LayerNorm used in ViT and most pre-LLaMA transformer designs.
- * Numerically robust: mean is computed in fp32 sum, variance via the
- * "naive" formula because input rows are short (<= 4096 for DINO/TripoSR)
- * so catastrophic cancellation is not a concern. */
+ * dimension, then optionally applies an affine transform.
+ *
+ * Mean and variance are accumulated in fp64 to keep error sub-ULP for the
+ * row sizes we hit in practice (hidden up to ~8192). With naive fp32 sum
+ * the LayerNorm cost ~3e-6 of relative drift per call, which compounds
+ * through the 48 LayerNorm calls inside the triplane decoder. */
 void iris_layer_norm(float *out, const float *x,
                      const float *gamma, const float *beta,
                      int seq_len, int hidden, float eps) {
@@ -583,18 +584,19 @@ void iris_layer_norm(float *out, const float *x,
         const float *x_row = x + s * hidden;
         float *out_row = out + s * hidden;
 
-        /* mean */
-        float sum = 0.0f;
-        for (int i = 0; i < hidden; i++) sum += x_row[i];
-        float mean = sum / (float)hidden;
+        /* mean (fp64 accumulator) */
+        double sum = 0.0;
+        for (int i = 0; i < hidden; i++) sum += (double)x_row[i];
+        double mean_d = sum / (double)hidden;
+        float mean = (float)mean_d;
 
-        /* variance */
-        float sq = 0.0f;
+        /* variance (fp64 accumulator) */
+        double sq = 0.0;
         for (int i = 0; i < hidden; i++) {
-            float d = x_row[i] - mean;
+            double d = (double)x_row[i] - mean_d;
             sq += d * d;
         }
-        float std_inv = 1.0f / sqrtf(sq / (float)hidden + eps);
+        float std_inv = (float)(1.0 / sqrt(sq / (double)hidden + (double)eps));
 
         /* normalize + optional affine */
         if (gamma && beta) {

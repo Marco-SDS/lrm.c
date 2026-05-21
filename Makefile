@@ -25,7 +25,7 @@ UNAME_M := $(shell uname -m)
 # binary is lrmc, library is liblrmc.a).
 
 INFRA_SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
-LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c
+LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c
 SRCS       = $(INFRA_SRCS) $(LRM_SRCS)
 OBJS       = $(SRCS:.c=.o)
 MAIN       = main.c
@@ -34,7 +34,7 @@ LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info pngtest test test-dino help generic blas mps
+.PHONY: all clean debug lib install info pngtest test test-dino test-decoder help generic blas mps
 .NOTPARALLEL: mps
 
 # Default: show available targets
@@ -54,9 +54,10 @@ endif
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make clean    - Remove build artifacts"
-	@echo "  make test       - Build and run the kernel parity tests"
-	@echo "  make test-dino  - Build and run the DINO ViT-B/16 parity test"
-	@echo "  make pngtest    - Run the PNG codec comparison test"
+	@echo "  make test         - Build and run the kernel parity tests"
+	@echo "  make test-dino    - Build and run the DINO ViT-B/16 parity test"
+	@echo "  make test-decoder - Build and run the triplane decoder parity test"
+	@echo "  make pngtest      - Run the PNG codec comparison test"
 	@echo "  make info     - Show build configuration"
 	@echo "  make lib      - Build static library ($(LIB))"
 	@echo ""
@@ -161,6 +162,15 @@ test-dino:
 	@/tmp/lrm_test_dino
 	@rm -f /tmp/lrm_test_dino
 
+test-decoder:
+	@echo "Building triplane decoder parity test..."
+	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
+	    tests/test_triplane_decoder.c lrm/lrm_triplane_decoder.c \
+	    iris.c iris_kernels.c iris_safetensors.c \
+	    -framework Accelerate -lm -o /tmp/lrm_test_decoder
+	@/tmp/lrm_test_decoder
+	@rm -f /tmp/lrm_test_decoder
+
 pngtest:
 	@echo "Running PNG compression compare test..."
 	@$(CC) $(CFLAGS_BASE) -I. png_compare.c iris_image.c iris.c -lm -o /tmp/lrm_png_compare
@@ -207,4 +217,5 @@ iris_safetensors.o: iris_safetensors.c iris_safetensors.h
 lrm/lrm.o: lrm/lrm.c lrm/lrm.h lrm/lrm_triposr.h iris.h
 lrm/lrm_triposr.o: lrm/lrm_triposr.c lrm/lrm_triposr.h lrm/lrm.h iris.h iris_safetensors.h
 lrm/lrm_vit_dino.o: lrm/lrm_vit_dino.c lrm/lrm_vit_dino.h iris.h iris_kernels.h iris_safetensors.h
+lrm/lrm_triplane_decoder.o: lrm/lrm_triplane_decoder.c lrm/lrm_triplane_decoder.h iris.h iris_kernels.h iris_safetensors.h
 main.o: main.c iris.h lrm/lrm.h lrm/lrm_triposr.h

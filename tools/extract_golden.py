@@ -241,7 +241,10 @@ def main() -> int:
             triplane_tokens,
             encoder_hidden_states=input_image_tokens,
         )
-        scene_codes = model.post_processor(model.tokenizer.detokenize(triplane_tokens))
+        # Pre-upsample scene code: detokenize but skip the post_processor.
+        # Shape [1, 3, 1024, 32, 32]. Phase 7 parity target.
+        triplane_pre_upsample = model.tokenizer.detokenize(triplane_tokens)
+        scene_codes = model.post_processor(triplane_pre_upsample)
         # scene_codes shape: [B=1, 3, 40, 64, 64]
 
     # ----- 4. Query density+color on a uniform mc_resolution^3 grid.
@@ -272,16 +275,19 @@ def main() -> int:
     # ----- 6. Dump artifacts.
     rgb_cond_np = rgb_cond.detach().cpu().numpy().astype(np.float32)
     dino_tokens_np = input_image_tokens.detach().cpu().numpy().astype(np.float32)
+    triplane_pre_np = triplane_pre_upsample.detach().cpu().numpy().astype(np.float32)
     triplane_np = scene_codes.detach().cpu().numpy().astype(np.float32)
 
     np.savez_compressed(GOLDEN_DIR / "input_512.npz", image=rgb_cond_np)
     np.savez_compressed(GOLDEN_DIR / "dino_tokens.npz", tokens=dino_tokens_np)
+    np.savez_compressed(GOLDEN_DIR / "triplane_pre_upsample.npz", triplane=triplane_pre_np)
     np.savez_compressed(GOLDEN_DIR / "triplane.npz", triplane=triplane_np)
     # Raw f32 .bin sidecars so the C parity tests don't have to parse zip/
     # numpy headers. The .npz files are convenient for Python tooling and
     # carry their shape implicitly; meta.json carries the shape for C.
     rgb_cond_np.tofile(GOLDEN_DIR / "input_512.bin")
     dino_tokens_np.tofile(GOLDEN_DIR / "dino_tokens.bin")
+    triplane_pre_np.tofile(GOLDEN_DIR / "triplane_pre_upsample.bin")
     triplane_np.tofile(GOLDEN_DIR / "triplane.bin")
     np.savez_compressed(
         GOLDEN_DIR / "density_64.npz",
@@ -316,6 +322,7 @@ def main() -> int:
         "shapes": {
             "input_512": list(rgb_cond_np.shape),
             "dino_tokens": list(dino_tokens_np.shape),
+            "triplane_pre_upsample": list(triplane_pre_np.shape),
             "triplane": list(triplane_np.shape),
             "density_grid": [n, n, n],
             "color_grid": [n, n, n, 3],

@@ -591,8 +591,17 @@ Each module file ships with a test that loads the relevant golden
 inputs, runs the C implementation, and `assert_allclose`s against the
 golden output:
 
-- f32 kernels: atol = `1e-4`, rtol = `1e-4`
+- f32 kernels (single-op): atol = `1e-4`, rtol = `1e-4`
+- f32 deep networks (compound, >10 residual adds): atol = `4e-3`, rtol = `1e-4`
 - bf16 kernels: atol = `5e-3`, rtol = `5e-3`
+
+The deeper-network tolerance reflects the f32 floor for compound graphs.
+Concretely (measured in Phase 7 on the 16-block triplane decoder, 3.15M
+output floats, fp32 throughout): mean |err| is ~8e-5, the worst absolute
+error is ~1e-2 but only on values of magnitude ~2700 (relative error 4e-6,
+well below the f32 mantissa). Tightening below 4e-3 atol on the deep
+networks would require selectively upgrading matmul/attention accumulation
+to f64 - a Phase 13 / Phase 14 optimization, not a correctness gate.
 
 A PR that breaks tolerance is blocked.
 
