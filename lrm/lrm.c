@@ -1,13 +1,17 @@
 /*
  * lrm.c - LRM coordinator: dispatch table for model-kind specific code.
  *
- * Phase 3 state: every entry point is a stub that fails predictably with
- * a message identifying the phase in LRMengine.md that will implement it.
- * The skeleton exists so callers (and the Makefile) can be wired up now,
- * and individual modules under lrm/ can be filled in over Phases 5-11.
+ * Phase 5 state: lrm_load() routes to the TripoSR loader (only model kind
+ * currently supported); lrm_free() releases the model. lrm_infer() and
+ * lrm_mesh_save_glb() are still stubs - their implementations come in
+ * Phases 6-11.
+ *
+ * When a second model kind lands (OpenLRM in Phase 15), this file gains a
+ * dispatch table keyed on a `kind` field in struct lrm_model.
  */
 
 #include "lrm.h"
+#include "lrm_triposr.h"
 
 #include <stddef.h>
 
@@ -16,15 +20,13 @@
  * ======================================================================== */
 
 lrm_model *lrm_load(const char *model_dir) {
-    (void)model_dir;
-    iris_set_error(
-        "lrm_load: not implemented yet (Phase 5 - safetensors loader)");
-    return NULL;
+    /* Only one model kind today; future variants will dispatch here based
+     * on a small probe (config.yaml model_class, or filename heuristics). */
+    return lrm_triposr_load(model_dir);
 }
 
 void lrm_free(lrm_model *m) {
-    (void)m;
-    /* No state to release yet. */
+    lrm_triposr_free(m);
 }
 
 /* ========================================================================

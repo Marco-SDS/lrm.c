@@ -25,7 +25,7 @@ UNAME_M := $(shell uname -m)
 # binary is lrmc, library is liblrmc.a).
 
 INFRA_SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
-LRM_SRCS   = lrm/lrm.c
+LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c
 SRCS       = $(INFRA_SRCS) $(LRM_SRCS)
 OBJS       = $(SRCS:.c=.o)
 MAIN       = main.c
@@ -194,5 +194,6 @@ iris.o: iris.c iris.h
 iris_kernels.o: iris_kernels.c iris_kernels.h
 iris_image.o: iris_image.c iris.h jpeg.h
 iris_safetensors.o: iris_safetensors.c iris_safetensors.h
-lrm/lrm.o: lrm/lrm.c lrm/lrm.h iris.h
-main.o: main.c iris.h lrm/lrm.h
+lrm/lrm.o: lrm/lrm.c lrm/lrm.h lrm/lrm_triposr.h iris.h
+lrm/lrm_triposr.o: lrm/lrm_triposr.c lrm/lrm_triposr.h lrm/lrm.h iris.h iris_safetensors.h
+main.o: main.c iris.h lrm/lrm.h lrm/lrm_triposr.h

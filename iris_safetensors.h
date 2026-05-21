@@ -13,8 +13,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Maximum number of tensors per file */
-#define SAFETENSORS_MAX_TENSORS 512
+/* Maximum number of tensors per file. TripoSR has 549; we keep a 2x margin
+ * so future LRM variants (OpenLRM, etc.) fit without resizing again. */
+#define SAFETENSORS_MAX_TENSORS 1024
 
 /* Tensor data types */
 typedef enum {
