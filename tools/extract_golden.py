@@ -56,6 +56,27 @@ if not (TRIPOSR_DIR / "tsr" / "system.py").exists():
 
 sys.path.insert(0, str(TRIPOSR_DIR))
 
+# tsr/utils.py does `import rembg` at module load time. We don't actually need
+# rembg for inputs that already carry an alpha channel (TripoSR's
+# remove_background() short-circuits in that case), and rembg transitively
+# pulls numba+llvmlite which often fails to build on newer Pythons. Inject a
+# stub so the top-level import succeeds; if rembg is genuinely needed at run
+# time the stub's attribute access will raise a clear error.
+if "rembg" not in sys.modules:
+    import types
+
+    _rembg_stub = types.ModuleType("rembg")
+
+    def _rembg_missing(*_args, **_kwargs):
+        raise RuntimeError(
+            "rembg is not installed in this venv. The input image must already "
+            "carry an alpha channel (TripoSR examples do)."
+        )
+
+    _rembg_stub.new_session = _rembg_missing
+    _rembg_stub.remove = _rembg_missing
+    sys.modules["rembg"] = _rembg_stub
+
 
 def select_device(requested: str) -> str:
     import torch
@@ -70,23 +91,40 @@ def select_device(requested: str) -> str:
 
 
 def preprocess_image(image_path: Path, remove_bg: bool, fg_ratio: float):
-    """Reproduce run.py's preprocessing exactly (rembg + 85% fg + gray comp)."""
+    """Reproduce run.py's preprocessing exactly (rembg + 85% fg + gray comp).
+
+    rembg is imported lazily so the script also works in environments where
+    rembg cannot be installed (it transitively pulls numba/llvmlite which
+    sometimes fails to build). When remove_bg=True but the input already has
+    a meaningful alpha channel, TripoSR's remove_background() is a no-op
+    anyway, so we still skip the rembg import in that case.
+    """
     import numpy as np
     from PIL import Image
+    from tsr.utils import resize_foreground
+
+    img = Image.open(image_path)
 
     if remove_bg:
-        import rembg
-        from tsr.utils import remove_background, resize_foreground
+        already_has_alpha = img.mode == "RGBA" and img.getextrema()[3][0] < 255
+        if already_has_alpha:
+            # TripoSR's remove_background() short-circuits in this case; we do
+            # the same without touching rembg so we avoid the heavy import.
+            pass
+        else:
+            import rembg  # only required for truly opaque inputs
+            from tsr.utils import remove_background
 
-        session = rembg.new_session()
-        img = remove_background(Image.open(image_path), session)
+            session = rembg.new_session()
+            img = remove_background(img, session)
+
         img = resize_foreground(img, fg_ratio)
         arr = np.array(img).astype(np.float32) / 255.0
         # Composite RGBA over gray 0.5 background, exactly as run.py does.
         arr = arr[:, :, :3] * arr[:, :, 3:4] + (1 - arr[:, :, 3:4]) * 0.5
         img = Image.fromarray((arr * 255.0).astype(np.uint8))
     else:
-        img = Image.open(image_path).convert("RGB")
+        img = img.convert("RGB")
     return img
 
 

@@ -1,0 +1,52 @@
+{
+  "triposr_commit": "d26e33181947bbbc4c6fc0f5734e1ec6c080956e",
+  "image_path": "triposr_env/examples/robot.png",
+  "image_sha256": "092ee61f1729ac9ed516c8d031d071f44dfa6e79f6ece04f32c988721b2b657a",
+  "mc_resolution": 64,
+  "density_threshold": 25.0,
+  "foreground_ratio": 0.85,
+  "remove_bg": true,
+  "device": "cpu",
+  "cond_image_size": 512,
+  "radius": 0.87,
+  "shapes": {
+    "input_512": [
+      1,
+      1,
+      512,
+      512,
+      3
+    ],
+    "dino_tokens": [
+      1,
+      1025,
+      768
+    ],
+    "triplane": [
+      1,
+      3,
+      40,
+      64,
+      64
+    ],
+    "density_grid": [
+      64,
+      64,
+      64
+    ],
+    "color_grid": [
+      64,
+      64,
+      64,
+      3
+    ],
+    "vertices": [
+      4634,
+      3
+    ],
+    "faces": [
+      9220,
+      3
+    ]
+  }
+}
