@@ -284,34 +284,11 @@ extern iris_step_callback_t iris_step_callback;
 typedef void (*iris_phase_callback_t)(const char *phase, int done);
 extern iris_phase_callback_t iris_phase_callback;
 
-/*
- * Step image callback - called after each denoising step with decoded image.
- * step: current step (1-based)
- * total: total number of steps
- * img: decoded image at this step (caller must NOT free)
- *
- * To use: set both iris_step_image_callback and iris_step_image_vae before
- * calling the sampling function. The callback is only invoked when both are set.
- */
-typedef void (*iris_step_image_callback_t)(int step, int total, const struct iris_image *img);
-extern iris_step_image_callback_t iris_step_image_callback;
-extern void *iris_step_image_vae;  /* Set to iris_vae_t* for step image decoding */
-
-/*
- * Text encoder progress callback - called once per Qwen3 layer.
- * layer: current layer (0-based)
- * total: total number of layers (36)
- */
-typedef void (*iris_text_progress_callback_t)(int layer, int total);
-extern iris_text_progress_callback_t iris_text_progress_callback;
-
-/*
- * VAE progress callback - called once per resblock/attention block.
- * block: current block (0-based)
- * total: total number of blocks (11 for encoder, 15 for decoder)
- */
-typedef void (*iris_vae_progress_callback_t)(int block, int total);
-extern iris_vae_progress_callback_t iris_vae_progress_callback;
+/* The diffusion-era step_image / text_progress / vae_progress callback
+ * extern declarations used to live here. They were tied to the iterative
+ * Euler denoising loop, the Qwen3 text encoder, and the VAE decoder - all
+ * removed in Phase 2. LRM-appropriate stage callbacks (encoder progress,
+ * decoder progress, MC progress) will be reintroduced in Phase 4. */
 
 /* Global verbose flag - when 0, library code suppresses diagnostic output */
 extern int iris_verbose;

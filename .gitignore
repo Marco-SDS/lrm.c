@@ -2,7 +2,9 @@
 *.o
 
 # Compiled binaries
+lrm
 flux
+iris
 
 # Model weights (large files)
 flux-klein-*/

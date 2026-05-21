@@ -30,14 +30,12 @@
 
 /* fast_expf is defined in iris_kernels.h */
 
-/* Progress callbacks - set by caller before inference */
+/* Progress callbacks - set by caller before inference.
+ * Phase 2 removed the diffusion-specific step_image / text_progress /
+ * vae_progress callbacks; LRM-specific stage callbacks come in Phase 4. */
 iris_substep_callback_t iris_substep_callback = NULL;
 iris_step_callback_t iris_step_callback = NULL;
 iris_phase_callback_t iris_phase_callback = NULL;
-iris_step_image_callback_t iris_step_image_callback = NULL;
-void *iris_step_image_vae = NULL;
-iris_text_progress_callback_t iris_text_progress_callback = NULL;
-iris_vae_progress_callback_t iris_vae_progress_callback = NULL;
 int iris_verbose = 0;
 
 /* ========================================================================
@@ -138,8 +136,8 @@ void iris_axpy(float *a, float scale, const float *b, int n) {
 /* General matrix multiply C = A @ B. Routes to Metal GPU when the matrix
  * is large enough that GPU compute outweighs the CPU-GPU transfer cost,
  * otherwise falls back to BLAS sgemm or a naive triple loop. This is the
- * backbone operation: every linear projection in the transformer, text
- * encoder, and VAE bottleneck goes through here. */
+ * backbone operation: every linear projection in the transformer encoder
+ * and decoder goes through here. */
 void iris_matmul(float *C, const float *A, const float *B,
                  int M, int K, int N) {
     /* C[M,N] = A[M,K] @ B[K,N] */
@@ -348,9 +346,8 @@ void iris_gpu_end_batch(void) {
 
 /* 2D convolution via im2col + GEMM: reshapes input so each column is a
  * flattened receptive field, then multiplies by the kernel weight matrix.
- * Tiles spatially to bound memory usage for large feature maps. This is the
- * standard approach for BLAS/GPU-friendly convolution, used throughout the
- * VAE encoder and decoder. */
+ * Tiles spatially to bound memory usage for large feature maps. Used by
+ * the ViT patch embedding and any other Conv2D in the LRM pipeline. */
 void iris_conv2d(float *out, const float *in, const float *weight, const float *bias,
                  int batch, int in_ch, int out_ch, int H, int W,
                  int kH, int kW, int stride, int padding) {
@@ -991,10 +988,10 @@ void iris_flash_attention(float *out, const float *Q, const float *K, const floa
 }
 
 /* Apply precomputed RoPE (Rotary Position Embedding) in-place using the
- * split-half convention: dim d pairs with dim d+half for rotation. This is
- * the Flux convention (4-axis, split-half); Z-Image uses consecutive pairs
- * via a separate kernel. RoPE lets the transformer learn relative position
- * from the dot-product structure of Q and K. */
+ * split-half convention: dim d pairs with dim d+half for rotation. RoPE
+ * lets the transformer learn relative position from the dot-product
+ * structure of Q and K. Currently unused by TripoSR (which uses learned
+ * positional embeddings); kept available for future LRM variants. */
 void iris_apply_rope(float *x, const float *freqs,
                      int batch, int seq, int heads, int head_dim) {
     /* x: [batch, seq, heads, head_dim]
