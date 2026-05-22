@@ -29,12 +29,18 @@
 
 #include <stdio.h>
 
-#include "lrm.h"
+#include "iris.h"
 #include "iris_safetensors.h"
+#include "lrm.h"
+#include "lrm_nerf_mlp.h"
+#include "lrm_triplane_decoder.h"
+#include "lrm_triplane_sample.h"
+#include "lrm_triplane_upsample.h"
+#include "lrm_vit_dino.h"
 
 /* TripoSR model state. `struct lrm_model` is currently an alias for this:
- * we only ship one model kind at Phase 5. When OpenLRM lands in Phase 15
- * we'll introduce a kind tag in struct lrm_model and refactor.
+ * we only ship one model kind. When OpenLRM lands in Phase 15 we'll
+ * introduce a kind tag in struct lrm_model and refactor.
  *
  * The safetensors handle owns the mmap; tensor pointers obtained via
  * safetensors_data() are borrowed into that mmap and must not be freed. */
@@ -55,7 +61,36 @@ struct lrm_model {
     int   decoder_linear_layers; /* 10 */
     float radius;              /* 0.87 */
     float density_threshold;   /* 25.0 */
+
+    /* Initialized sub-modules (Phase 12). All weight pointers inside
+     * these structs borrow from `st`; release lifetime follows `st`. */
+    lrm_vit_dino             vit;
+    lrm_triplane_decoder     decoder;
+    lrm_triplane_upsample    upsample;
+    lrm_triplane_sample_cfg  sample_cfg;
+    lrm_nerf_mlp             mlp;
+    int                      modules_ready;  /* 1 once all sub-inits succeeded */
 };
+
+/* Preprocess an input image for the DINO encoder (Phase 12).
+ *
+ *   - If the image is RGBA with non-255 alpha, crop to alpha bbox, pad to
+ *     square, pad to fg_ratio (0.85) of canvas, composite over gray 0.5.
+ *   - If the image is RGB or fully-opaque RGBA, no rembg-style cleanup
+ *     is done (caller is responsible).
+ *   - Resize to cond_image_size x cond_image_size with plain bilinear.
+ *   - Convert to f32 [0, 1] and transpose to CHW.
+ *
+ * out must point to 3 * cond_image_size * cond_image_size floats.
+ * Returns 0 on success, -1 with iris_get_error() set on failure.
+ *
+ * Note: this uses plain bilinear instead of PyTorch's antialiased
+ * bilinear. Differences are small (<1% per-pixel) and the model-level
+ * parity tests (Phases 6-10) already validate the rest of the chain.
+ */
+int lrm_triposr_preprocess(const struct lrm_model *m,
+                           const iris_image *im,
+                           float *out_chw);
 
 /* Open a TripoSR safetensors file (path can be a directory containing
  * model.safetensors, or a direct .safetensors path). On success, returns

@@ -206,9 +206,7 @@ struct lrm_model *lrm_triposr_load(const char *model_dir) {
     }
 
     m->st = sf;
-    /* Architectural constants matching the pinned config.yaml. These are
-     * surface-level facts; Phase 6+ will compute derived values (head_dim,
-     * num_heads, etc.) from these. */
+    /* Architectural constants matching the pinned config.yaml. */
     m->cond_image_size       = 512;
     m->dino_hidden           = 768;
     m->dino_layers           = 12;
@@ -221,11 +219,50 @@ struct lrm_model *lrm_triposr_load(const char *model_dir) {
     m->decoder_linear_layers = 10;
     m->radius                = 0.87f;
     m->density_threshold     = 25.0f;
+
+    /* Initialize all sub-modules (Phase 12). On any failure, free what's
+     * been built and return NULL. */
+    if (lrm_vit_dino_init(&m->vit, sf, m->cond_image_size) != 0) {
+        lrm_triposr_free(m);
+        return NULL;
+    }
+    if (lrm_triplane_decoder_init(&m->decoder, sf) != 0) {
+        lrm_vit_dino_release(&m->vit);
+        safetensors_close(sf);
+        free(m);
+        return NULL;
+    }
+    if (lrm_triplane_upsample_init(&m->upsample, sf) != 0) {
+        lrm_triplane_decoder_release(&m->decoder);
+        lrm_vit_dino_release(&m->vit);
+        safetensors_close(sf);
+        free(m);
+        return NULL;
+    }
+    if (lrm_nerf_mlp_init(&m->mlp, sf) != 0) {
+        lrm_triplane_upsample_release(&m->upsample);
+        lrm_triplane_decoder_release(&m->decoder);
+        lrm_vit_dino_release(&m->vit);
+        safetensors_close(sf);
+        free(m);
+        return NULL;
+    }
+    m->sample_cfg.planes   = m->triplane_planes;
+    m->sample_cfg.channels = m->triplane_channels;
+    m->sample_cfg.size     = m->triplane_size;
+    m->sample_cfg.radius   = m->radius;
+    m->modules_ready = 1;
     return m;
 }
 
 void lrm_triposr_free(struct lrm_model *m) {
     if (m == NULL) return;
+    if (m->modules_ready) {
+        /* lrm_nerf_mlp has no owned allocations; nothing to release. */
+        lrm_triplane_upsample_release(&m->upsample);
+        lrm_triplane_decoder_release(&m->decoder);
+        lrm_vit_dino_release(&m->vit);
+    }
     if (m->st) safetensors_close(m->st);
     free(m);
 }
@@ -333,4 +370,145 @@ void lrm_triposr_print_tree(const struct lrm_model *m, FILE *out) {
             if (!known) print_one(out, &sf->tensors[i]);
         }
     }
+}
+
+/* ========================================================================
+ * Phase 12: Image preprocessing
+ * ======================================================================== */
+
+#include <math.h>
+
+int lrm_triposr_preprocess(const struct lrm_model *m,
+                           const iris_image *im,
+                           float *out_chw) {
+    if (!m || !im || !im->data || !out_chw) {
+        iris_set_error("preprocess: NULL argument");
+        return -1;
+    }
+    if (im->channels != 3 && im->channels != 4) {
+        iris_set_error("preprocess: image must be RGB or RGBA");
+        return -1;
+    }
+
+    const int target = m->cond_image_size;     /* 512 */
+    const float fg_ratio = 0.85f;
+    const int H = im->height;
+    const int W = im->width;
+    const int C = im->channels;
+    const uint8_t *src = im->data;
+
+    /* ---- Step 1: alpha bbox (only if RGBA with non-uniform alpha). */
+    int y1, y2, x1, x2;
+    int has_alpha_mask = 0;
+    if (C == 4) {
+        /* Check if any pixel is non-opaque -- TripoSR's
+         * remove_background() short-circuits if alpha is uniform 255. */
+        for (int y = 0; y < H && !has_alpha_mask; y++) {
+            for (int x = 0; x < W; x++) {
+                if (src[(y * W + x) * 4 + 3] < 255) {
+                    has_alpha_mask = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (has_alpha_mask) {
+        y1 = H; y2 = -1; x1 = W; x2 = -1;
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                if (src[(y * W + x) * 4 + 3] > 0) {
+                    if (y < y1) y1 = y;
+                    if (y > y2) y2 = y;
+                    if (x < x1) x1 = x;
+                    if (x > x2) x2 = x;
+                }
+            }
+        }
+        if (y2 < y1 || x2 < x1) {
+            iris_set_error("preprocess: empty alpha mask");
+            return -1;
+        }
+    } else {
+        /* No alpha info: treat the whole image as foreground (caller is
+         * responsible for having pre-cleaned it). */
+        y1 = 0; y2 = H - 1; x1 = 0; x2 = W - 1;
+    }
+
+    const int fg_h = y2 - y1 + 1;
+    const int fg_w = x2 - x1 + 1;
+    const int sq   = (fg_h > fg_w) ? fg_h : fg_w;
+    const int canvas = (int)((float)sq / fg_ratio);
+    const int off_y  = (sq - fg_h) / 2 + (canvas - sq) / 2;
+    const int off_x  = (sq - fg_w) / 2 + (canvas - sq) / 2;
+
+    /* ---- Step 2: build the canvas RGB image in float, with the alpha
+     *               composite over gray 0.5 applied at canvas resolution
+     *               (matches Python's tsr/utils.py + run.py exactly:
+     *                composite happens BEFORE the resize to 512). */
+    float *canvas_rgb = (float *)malloc((size_t)canvas * canvas * 3 * sizeof(float));
+    if (!canvas_rgb) {
+        iris_set_error("preprocess: out of memory for canvas");
+        return -1;
+    }
+
+    /* Fill canvas with gray 0.5 (the composite for alpha=0 pixels). */
+    for (int i = 0; i < canvas * canvas * 3; i++) canvas_rgb[i] = 0.5f;
+
+    /* Stamp the cropped foreground into the canvas with composite. */
+    for (int y = y1; y <= y2; y++) {
+        int cy = (y - y1) + off_y;
+        for (int x = x1; x <= x2; x++) {
+            int cx = (x - x1) + off_x;
+            float a = (has_alpha_mask)
+                ? (float)src[(y * W + x) * 4 + 3] / 255.0f : 1.0f;
+            float r = (float)src[(y * W + x) * C + 0] / 255.0f;
+            float g = (float)src[(y * W + x) * C + 1] / 255.0f;
+            float b = (float)src[(y * W + x) * C + 2] / 255.0f;
+            float *dst = canvas_rgb + (cy * canvas + cx) * 3;
+            dst[0] = r * a + 0.5f * (1.0f - a);
+            dst[1] = g * a + 0.5f * (1.0f - a);
+            dst[2] = b * a + 0.5f * (1.0f - a);
+        }
+    }
+
+    /* ---- Step 3: bilinear resize canvas_rgb -> target x target, with
+     *               align_corners=False and replicate-padding (PyTorch
+     *               default for F.interpolate). Output stored as CHW. */
+    const float scale = (float)canvas / (float)target;
+    for (int oy = 0; oy < target; oy++) {
+        float sy_f = ((float)oy + 0.5f) * scale - 0.5f;
+        int sy0 = (int)floorf(sy_f);
+        int sy1 = sy0 + 1;
+        float dy = sy_f - (float)sy0;
+        if (sy0 < 0) sy0 = 0;
+        if (sy0 > canvas - 1) sy0 = canvas - 1;
+        if (sy1 < 0) sy1 = 0;
+        if (sy1 > canvas - 1) sy1 = canvas - 1;
+        for (int ox = 0; ox < target; ox++) {
+            float sx_f = ((float)ox + 0.5f) * scale - 0.5f;
+            int sx0 = (int)floorf(sx_f);
+            int sx1 = sx0 + 1;
+            float dx = sx_f - (float)sx0;
+            if (sx0 < 0) sx0 = 0;
+            if (sx0 > canvas - 1) sx0 = canvas - 1;
+            if (sx1 < 0) sx1 = 0;
+            if (sx1 > canvas - 1) sx1 = canvas - 1;
+            float w00 = (1.0f - dx) * (1.0f - dy);
+            float w10 = dx * (1.0f - dy);
+            float w01 = (1.0f - dx) * dy;
+            float w11 = dx * dy;
+            for (int ch = 0; ch < 3; ch++) {
+                float v00 = canvas_rgb[(sy0 * canvas + sx0) * 3 + ch];
+                float v10 = canvas_rgb[(sy0 * canvas + sx1) * 3 + ch];
+                float v01 = canvas_rgb[(sy1 * canvas + sx0) * 3 + ch];
+                float v11 = canvas_rgb[(sy1 * canvas + sx1) * 3 + ch];
+                float v = w00*v00 + w10*v10 + w01*v01 + w11*v11;
+                /* CHW output. */
+                out_chw[ch * target * target + oy * target + ox] = v;
+            }
+        }
+    }
+    free(canvas_rgb);
+    return 0;
 }

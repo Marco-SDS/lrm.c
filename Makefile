@@ -34,7 +34,7 @@ LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info pngtest test test-dino test-decoder test-upsample test-density test-mc test-glb help generic blas mps
+.PHONY: all clean debug lib install info pngtest test test-dino test-decoder test-upsample test-density test-mc test-glb test-e2e help generic blas mps
 .NOTPARALLEL: mps
 
 # Default: show available targets
@@ -61,6 +61,7 @@ endif
 	@echo "  make test-density  - Build and run the triplane-sample + NeRF MLP test"
 	@echo "  make test-mc       - Build and run the marching cubes parity test"
 	@echo "  make test-glb      - Build and run the GLB writer structural test"
+	@echo "  make test-e2e      - End-to-end TripoSR inference at 64^3 (~50 s on Intel macOS CPU)"
 	@echo "  make pngtest       - Run the PNG codec comparison test"
 	@echo "  make info     - Show build configuration"
 	@echo "  make lib      - Build static library ($(LIB))"
@@ -160,8 +161,8 @@ test:
 test-dino:
 	@echo "Building DINO ViT-B/16 parity test..."
 	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
-	    tests/test_vit_dino.c lrm/lrm_vit_dino.c lrm/lrm_triposr.c lrm/lrm.c \
-	    iris.c iris_kernels.c iris_image.c iris_safetensors.c jpeg.c \
+	    tests/test_vit_dino.c lrm/lrm_vit_dino.c \
+	    iris.c iris_kernels.c iris_safetensors.c \
 	    -framework Accelerate -lm -o /tmp/lrm_test_dino
 	@/tmp/lrm_test_dino
 	@rm -f /tmp/lrm_test_dino
@@ -213,6 +214,19 @@ test-glb:
 	    triposr_env/.venv/bin/python -c "import trimesh; m = trimesh.load('/tmp/lrm_test.glb'); g = list(m.geometry.values())[0] if hasattr(m, 'geometry') else m; print(f'  trimesh: vertices={len(g.vertices)} faces={len(g.faces)} has_vc={hasattr(g.visual, \"vertex_colors\") and g.visual.vertex_colors is not None}')"; \
 	fi
 	@rm -f /tmp/lrm_test_glb /tmp/lrm_test.glb
+
+test-e2e: blas
+	@echo ""
+	@echo "Running end-to-end TripoSR inference at 64^3 ..."
+	@./lrmc infer triposr_env triposr_env/examples/robot.png \
+	    -o /tmp/lrm_e2e.glb --mc-resolution 64
+	@if [ -x triposr_env/.venv/bin/python ]; then \
+	    echo ""; \
+	    echo "Verifying GLB via trimesh:"; \
+	    triposr_env/.venv/bin/python -c "import trimesh; m = trimesh.load('/tmp/lrm_e2e.glb'); g = list(m.geometry.values())[0] if hasattr(m, 'geometry') and m.geometry else m; print(f'  vertices={len(g.vertices)} faces={len(g.faces)} bounds=[{g.bounds[0]} .. {g.bounds[1]}] has_vc={g.visual.vertex_colors is not None}')"; \
+	fi
+	@echo ""
+	@echo "PASS  end-to-end inference (/tmp/lrm_e2e.glb)"
 
 pngtest:
 	@echo "Running PNG compression compare test..."
