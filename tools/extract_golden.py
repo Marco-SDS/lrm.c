@@ -291,6 +291,9 @@ def main() -> int:
     triplane_np.tofile(GOLDEN_DIR / "triplane.bin")
     density_grid.astype(np.float32).tofile(GOLDEN_DIR / "density.bin")
     color_grid.astype(np.float32).tofile(GOLDEN_DIR / "color.bin")
+    vertices.tofile(GOLDEN_DIR / "mesh_vertices.bin")
+    faces.tofile(GOLDEN_DIR / "mesh_faces.bin")
+    vertex_colors.tofile(GOLDEN_DIR / "mesh_vertex_colors.bin")
     np.savez_compressed(
         GOLDEN_DIR / "density_64.npz",
         density=density_grid,

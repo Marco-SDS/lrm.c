@@ -25,7 +25,7 @@ UNAME_M := $(shell uname -m)
 # binary is lrmc, library is liblrmc.a).
 
 INFRA_SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
-LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c lrm/lrm_triplane_upsample.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c
+LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c lrm/lrm_triplane_upsample.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c lrm/lrm_marching_cubes.c
 SRCS       = $(INFRA_SRCS) $(LRM_SRCS)
 OBJS       = $(SRCS:.c=.o)
 MAIN       = main.c
@@ -34,7 +34,7 @@ LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info pngtest test test-dino test-decoder test-upsample test-density help generic blas mps
+.PHONY: all clean debug lib install info pngtest test test-dino test-decoder test-upsample test-density test-mc help generic blas mps
 .NOTPARALLEL: mps
 
 # Default: show available targets
@@ -59,6 +59,7 @@ endif
 	@echo "  make test-decoder  - Build and run the triplane decoder parity test"
 	@echo "  make test-upsample - Build and run the post-processor parity test"
 	@echo "  make test-density  - Build and run the triplane-sample + NeRF MLP test"
+	@echo "  make test-mc       - Build and run the marching cubes parity test"
 	@echo "  make pngtest       - Run the PNG codec comparison test"
 	@echo "  make info     - Show build configuration"
 	@echo "  make lib      - Build static library ($(LIB))"
@@ -192,6 +193,14 @@ test-density:
 	@/tmp/lrm_test_density
 	@rm -f /tmp/lrm_test_density
 
+test-mc:
+	@echo "Building marching cubes parity test..."
+	@$(CC) $(CFLAGS_BASE) \
+	    tests/test_marching_cubes.c lrm/lrm_marching_cubes.c iris.c \
+	    -lm -o /tmp/lrm_test_mc
+	@/tmp/lrm_test_mc
+	@rm -f /tmp/lrm_test_mc
+
 pngtest:
 	@echo "Running PNG compression compare test..."
 	@$(CC) $(CFLAGS_BASE) -I. png_compare.c iris_image.c iris.c -lm -o /tmp/lrm_png_compare
@@ -242,4 +251,5 @@ lrm/lrm_triplane_decoder.o: lrm/lrm_triplane_decoder.c lrm/lrm_triplane_decoder.
 lrm/lrm_triplane_upsample.o: lrm/lrm_triplane_upsample.c lrm/lrm_triplane_upsample.h iris.h iris_kernels.h iris_safetensors.h
 lrm/lrm_triplane_sample.o: lrm/lrm_triplane_sample.c lrm/lrm_triplane_sample.h iris.h iris_kernels.h
 lrm/lrm_nerf_mlp.o: lrm/lrm_nerf_mlp.c lrm/lrm_nerf_mlp.h iris.h iris_kernels.h iris_safetensors.h
+lrm/lrm_marching_cubes.o: lrm/lrm_marching_cubes.c lrm/lrm_marching_cubes.h iris.h
 main.o: main.c iris.h lrm/lrm.h lrm/lrm_triposr.h
