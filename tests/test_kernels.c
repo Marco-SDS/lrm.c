@@ -113,6 +113,14 @@ static const float ref_gs_out[10] = {
     +2.80000000e+01f,  +2.11000004e+01f
 };
 
+/* Same inputs but with padding_mode='zeros' (PyTorch default) — used by
+ * TripoSR's triplane sampler. Out-of-range neighbors contribute 0. */
+static const float ref_gs_out_zeros[10] = {
+    +7.50000000e+00f, +0.00000000e+00f, +3.75000000e+00f, +0.00000000e+00f,
+    +2.50000000e+00f, +2.60000000e+01f, +1.85000000e+01f, +2.85000000e+01f,
+    +7.00000000e+00f, +2.11000004e+01f
+};
+
 /* ========================================================================
  * Comparison helper
  * ======================================================================== */
@@ -183,8 +191,20 @@ static int test_grid_sample(void) {
     float out[10];
     iris_grid_sample_bilinear(out, ref_gs_input, ref_gs_grid,
                               /*N_planes=*/2, /*C=*/1,
-                              /*H=*/4, /*W=*/4, /*N_points=*/5);
-    return compare_array("grid_sample[2x1x4x4 -> 5 pts]", ref_gs_out, out, 10);
+                              /*H=*/4, /*W=*/4, /*N_points=*/5,
+                              IRIS_GS_PAD_BORDER);
+    return compare_array("grid_sample[2x1x4x4 -> 5 pts, border]",
+                         ref_gs_out, out, 10);
+}
+
+static int test_grid_sample_zeros(void) {
+    float out[10];
+    iris_grid_sample_bilinear(out, ref_gs_input, ref_gs_grid,
+                              /*N_planes=*/2, /*C=*/1,
+                              /*H=*/4, /*W=*/4, /*N_points=*/5,
+                              IRIS_GS_PAD_ZEROS);
+    return compare_array("grid_sample[2x1x4x4 -> 5 pts, zeros]",
+                         ref_gs_out_zeros, out, 10);
 }
 
 int main(void) {
@@ -194,6 +214,7 @@ int main(void) {
     failures += test_gelu();
     failures += test_geglu();
     failures += test_grid_sample();
+    failures += test_grid_sample_zeros();
 
     if (failures == 0) {
         printf("\nALL TESTS PASSED\n");

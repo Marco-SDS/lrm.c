@@ -744,7 +744,8 @@ void iris_softmax(float *x, int rows, int cols) {
 void iris_grid_sample_bilinear(float *out, const float *input,
                                const float *grid,
                                int N_planes, int C, int H, int W,
-                               int N_points) {
+                               int N_points,
+                               iris_gs_padding_t padding) {
     const int plane_stride = C * H * W;
     const int channel_stride = H * W;
     const int out_plane_stride = C * N_points;
@@ -762,31 +763,62 @@ void iris_grid_sample_bilinear(float *out, const float *input,
             float px = (gx + 1.0f) * 0.5f * (float)W - 0.5f;
             float py = (gy + 1.0f) * 0.5f * (float)H - 0.5f;
 
-            /* border padding: clamp the fractional coord */
-            if (px < 0.0f) px = 0.0f;
-            if (py < 0.0f) py = 0.0f;
-            float maxx = (float)(W - 1);
-            float maxy = (float)(H - 1);
-            if (px > maxx) px = maxx;
-            if (py > maxy) py = maxy;
+            /* Compute the four enclosing integer neighbors. Whether each
+             * neighbor is "valid" (in-range) or treated as zero depends on
+             * the padding mode. For BORDER we clamp px/py and the neighbors;
+             * for ZEROS we keep the originals and treat out-of-range
+             * neighbors as zero contributions. */
+            int x0, y0, x1, y1;
+            int v00_ok, v10_ok, v01_ok, v11_ok;
+            float dx, dy;
 
-            int x0 = (int)floorf(px);
-            int y0 = (int)floorf(py);
-            int x1 = x0 + 1;
-            int y1 = y0 + 1;
-            /* Neighbors can fall outside after floor (e.g. px is already
-             * at W-1); border-clamp them too. */
-            if (x0 < 0) x0 = 0;
-            if (y0 < 0) y0 = 0;
-            if (x1 > W - 1) x1 = W - 1;
-            if (y1 > H - 1) y1 = H - 1;
+            if (padding == IRIS_GS_PAD_BORDER) {
+                if (px < 0.0f) px = 0.0f;
+                if (py < 0.0f) py = 0.0f;
+                if (px > (float)(W - 1)) px = (float)(W - 1);
+                if (py > (float)(H - 1)) py = (float)(H - 1);
+                x0 = (int)floorf(px);
+                y0 = (int)floorf(py);
+                x1 = x0 + 1;
+                y1 = y0 + 1;
+                if (x0 < 0) x0 = 0;
+                if (y0 < 0) y0 = 0;
+                if (x1 > W - 1) x1 = W - 1;
+                if (y1 > H - 1) y1 = H - 1;
+                dx = px - (float)x0;
+                dy = py - (float)y0;
+                v00_ok = v10_ok = v01_ok = v11_ok = 1;
+            } else {
+                /* ZEROS padding: out-of-range neighbors contribute 0.
+                 *
+                 * Subtle: we cannot clamp x0/y0 jointly when only one is
+                 * out of range, because that would corrupt the *other*
+                 * corner's coordinate that shares only that one axis.
+                 * Instead, mask each corner independently with its own
+                 * v??_ok and clamp each x/y individually for safe array
+                 * access (the bad-corner read still happens but its
+                 * weight is zeroed so the value is discarded). */
+                x0 = (int)floorf(px);
+                y0 = (int)floorf(py);
+                x1 = x0 + 1;
+                y1 = y0 + 1;
+                dx = px - (float)x0;
+                dy = py - (float)y0;
+                v00_ok = (x0 >= 0 && x0 <= W - 1 && y0 >= 0 && y0 <= H - 1);
+                v10_ok = (x1 >= 0 && x1 <= W - 1 && y0 >= 0 && y0 <= H - 1);
+                v01_ok = (x0 >= 0 && x0 <= W - 1 && y1 >= 0 && y1 <= H - 1);
+                v11_ok = (x1 >= 0 && x1 <= W - 1 && y1 >= 0 && y1 <= H - 1);
+                /* Clamp each axis index independently for safe deref. */
+                if (x0 < 0) x0 = 0; else if (x0 > W - 1) x0 = W - 1;
+                if (x1 < 0) x1 = 0; else if (x1 > W - 1) x1 = W - 1;
+                if (y0 < 0) y0 = 0; else if (y0 > H - 1) y0 = H - 1;
+                if (y1 < 0) y1 = 0; else if (y1 > H - 1) y1 = H - 1;
+            }
 
-            float dx = px - (float)x0;
-            float dy = py - (float)y0;
-            float w00 = (1.0f - dx) * (1.0f - dy);
-            float w10 = dx * (1.0f - dy);
-            float w01 = (1.0f - dx) * dy;
-            float w11 = dx * dy;
+            float w00 = (v00_ok ? (1.0f - dx) * (1.0f - dy) : 0.0f);
+            float w10 = (v10_ok ?         dx  * (1.0f - dy) : 0.0f);
+            float w01 = (v01_ok ? (1.0f - dx) *         dy  : 0.0f);
+            float w11 = (v11_ok ?         dx  *         dy  : 0.0f);
 
             const float *row0_x0 = plane_in + y0 * W + x0;
             const float *row0_x1 = plane_in + y0 * W + x1;

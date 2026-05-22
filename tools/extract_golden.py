@@ -289,6 +289,8 @@ def main() -> int:
     dino_tokens_np.tofile(GOLDEN_DIR / "dino_tokens.bin")
     triplane_pre_np.tofile(GOLDEN_DIR / "triplane_pre_upsample.bin")
     triplane_np.tofile(GOLDEN_DIR / "triplane.bin")
+    density_grid.astype(np.float32).tofile(GOLDEN_DIR / "density.bin")
+    color_grid.astype(np.float32).tofile(GOLDEN_DIR / "color.bin")
     np.savez_compressed(
         GOLDEN_DIR / "density_64.npz",
         density=density_grid,

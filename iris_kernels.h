@@ -185,12 +185,23 @@ void iris_softmax_cpu(float *x, int rows, int cols);
  * Spatial Sampling
  * ======================================================================== */
 
+/* Padding mode for iris_grid_sample_bilinear. Mirrors PyTorch's
+ * F.grid_sample(padding_mode=...) options we need:
+ *   ZEROS  - PyTorch default; positions outside [-1, 1] contribute zero
+ *            (the bilinear weight stays the same, the missing pixel
+ *            value is taken as 0). Used by TripoSR's triplane sampler.
+ *   BORDER - positions are clamped to the boundary pixel. Used by some
+ *            other vision tasks and the existing kernel parity test. */
+typedef enum {
+    IRIS_GS_PAD_ZEROS  = 0,
+    IRIS_GS_PAD_BORDER = 1
+} iris_gs_padding_t;
+
 /*
  * Bilinear grid_sample (PyTorch-compatible).
  * For each of N_planes feature maps, samples N_points locations using
  * bilinear interpolation. Grid coordinates are normalized [-1, +1] in
- * (x=column, y=row) order. Uses padding_mode='border' (out-of-range
- * coordinates clamp to the edge) and align_corners=False (so a normalized
+ * (x=column, y=row) order. align_corners=False (so a normalized
  * coordinate of -1 maps to half a pixel left of pixel 0).
  *
  * input:  [N_planes, C, H, W]
@@ -205,7 +216,8 @@ void iris_softmax_cpu(float *x, int rows, int cols);
 void iris_grid_sample_bilinear(float *out, const float *input,
                                const float *grid,
                                int N_planes, int C, int H, int W,
-                               int N_points);
+                               int N_points,
+                               iris_gs_padding_t padding);
 
 /* ========================================================================
  * Attention Operations
