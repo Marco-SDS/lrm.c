@@ -210,8 +210,8 @@ test-glb:
 	    -lm -o /tmp/lrm_test_glb
 	@/tmp/lrm_test_glb
 	@if [ -x triposr_env/.venv/bin/python ]; then \
-	    echo "round-trip via trimesh ..."; \
-	    triposr_env/.venv/bin/python -c "import trimesh; m = trimesh.load('/tmp/lrm_test.glb'); g = list(m.geometry.values())[0] if hasattr(m, 'geometry') else m; print(f'  trimesh: vertices={len(g.vertices)} faces={len(g.faces)} has_vc={hasattr(g.visual, \"vertex_colors\") and g.visual.vertex_colors is not None}')"; \
+	    echo "round-trip via trimesh + raw glTF inspection ..."; \
+	    triposr_env/.venv/bin/python tools/check_glb.py /tmp/lrm_test.glb; \
 	fi
 	@rm -f /tmp/lrm_test_glb /tmp/lrm_test.glb
 

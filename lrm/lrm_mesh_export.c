@@ -18,6 +18,7 @@
 
 #include "lrm_mesh_export.h"
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -63,6 +64,7 @@ void lrm_mesh_free(lrm_mesh *m) {
 #define GLTF_VERSION        2u
 #define GLTF_CHUNK_JSON     0x4E4F534Au  /* 'JSON' */
 #define GLTF_CHUNK_BIN      0x004E4942u  /* 'BIN\0' */
+#define GLTF_COMP_U8        5121
 #define GLTF_COMP_U16       5123
 #define GLTF_COMP_U32       5125
 #define GLTF_COMP_F32       5126
@@ -124,6 +126,70 @@ static int bb_printf(bytebuf *b, const char *fmt, ...) {
     return bb_write(b, tmp, (size_t)n);
 }
 
+/* ------------------------------------------------------------------ */
+/* Compute per-vertex normals by area-weighted face-normal averaging.
+ * Each face contributes its (unnormalized) normal to each of its three
+ * vertices; we then normalize per vertex. This matches what trimesh does
+ * by default when normals aren't already present. */
+static int compute_vertex_normals(const float *vertices, int Nv,
+                                  const int32_t *faces, int Nf,
+                                  float *out_normals /* [Nv*3] */) {
+    memset(out_normals, 0, (size_t)Nv * 3 * sizeof(float));
+    for (int f = 0; f < Nf; f++) {
+        int i0 = faces[f * 3 + 0];
+        int i1 = faces[f * 3 + 1];
+        int i2 = faces[f * 3 + 2];
+        if (i0 < 0 || i1 < 0 || i2 < 0
+            || i0 >= Nv || i1 >= Nv || i2 >= Nv) {
+            continue; /* skip degenerate / out-of-range; should not happen */
+        }
+        const float *p0 = vertices + (size_t)i0 * 3;
+        const float *p1 = vertices + (size_t)i1 * 3;
+        const float *p2 = vertices + (size_t)i2 * 3;
+        float ax = p1[0]-p0[0], ay = p1[1]-p0[1], az = p1[2]-p0[2];
+        float bx = p2[0]-p0[0], by = p2[1]-p0[1], bz = p2[2]-p0[2];
+        /* Cross product magnitude = 2 * triangle area, which gives area
+         * weighting "for free" in the accumulation. */
+        float nx = ay * bz - az * by;
+        float ny = az * bx - ax * bz;
+        float nz = ax * by - ay * bx;
+        out_normals[i0*3+0] += nx; out_normals[i0*3+1] += ny; out_normals[i0*3+2] += nz;
+        out_normals[i1*3+0] += nx; out_normals[i1*3+1] += ny; out_normals[i1*3+2] += nz;
+        out_normals[i2*3+0] += nx; out_normals[i2*3+1] += ny; out_normals[i2*3+2] += nz;
+    }
+    for (int v = 0; v < Nv; v++) {
+        float nx = out_normals[v*3+0];
+        float ny = out_normals[v*3+1];
+        float nz = out_normals[v*3+2];
+        float len = sqrtf(nx*nx + ny*ny + nz*nz);
+        if (len > 1e-12f) {
+            float inv = 1.0f / len;
+            out_normals[v*3+0] = nx * inv;
+            out_normals[v*3+1] = ny * inv;
+            out_normals[v*3+2] = nz * inv;
+        } else {
+            /* Vertex with no triangles (shouldn't happen for MC output) -
+             * fall back to +Z so the GLB stays valid. */
+            out_normals[v*3+0] = 0.0f;
+            out_normals[v*3+1] = 0.0f;
+            out_normals[v*3+2] = 1.0f;
+        }
+    }
+    return 0;
+}
+
+/* Clamp+quantize an f32 channel in [0, 1] to u8 [0, 255]. */
+static inline uint8_t f32_to_u8(float v) {
+    if (v <= 0.0f) return 0;
+    if (v >= 1.0f) return 255;
+    /* Standard glTF rule for "normalized" component: round-half-to-even
+     * is not strictly required, but match what trimesh does (just *255
+     * with implicit truncation gives slightly different results). The
+     * +0.5 rounding is what PIL.Image.fromarray((arr*255).astype(uint8))
+     * effectively does after `arr.clip(0, 1)`. */
+    return (uint8_t)(v * 255.0f + 0.5f);
+}
+
 int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
     if (!mesh || !path) {
         iris_set_error("lrm_mesh_save_glb: NULL argument");
@@ -156,21 +222,54 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
         }
     }
 
+    /* Compute per-vertex normals (required for material shading). */
+    float *normals = (float *)malloc((size_t)Nv * 3 * sizeof(float));
+    if (!normals) {
+        iris_set_error("lrm_mesh_save_glb: oom for normals");
+        return -1;
+    }
+    compute_vertex_normals(mesh->vertices, Nv, mesh->faces, Nf, normals);
+
+    /* Convert vertex colors to u8 normalized RGBA. Smaller (4x) and
+     * universally readable by viewers; matches trimesh's exported GLB. */
+    uint8_t *colors_u8 = NULL;
+    if (has_color) {
+        colors_u8 = (uint8_t *)malloc((size_t)Nv * 4 * sizeof(uint8_t));
+        if (!colors_u8) {
+            free(normals);
+            iris_set_error("lrm_mesh_save_glb: oom for color quantization");
+            return -1;
+        }
+        for (int i = 0; i < Nv * 4; i++) {
+            colors_u8[i] = f32_to_u8(mesh->vertex_colors[i]);
+        }
+    }
+
     /* Build the binary chunk first so we know its layout, then JSON
-     * references it via byteOffset / byteLength. */
+     * references it via byteOffset / byteLength.
+     *
+     * Layout: POSITION | NORMAL | COLOR_0 (u8, padded) | indices (padded).
+     */
     bytebuf bin = {0};
+
     /* POSITION */
     const size_t pos_off = bin.len;
     const size_t pos_len = (size_t)Nv * 3 * sizeof(float);
     if (bb_write(&bin, mesh->vertices, pos_len) != 0) goto oom;
 
-    /* COLOR_0 (optional) */
+    /* NORMAL */
+    if (bb_pad_to_4(&bin, 0) != 0) goto oom;
+    const size_t nor_off = bin.len;
+    const size_t nor_len = (size_t)Nv * 3 * sizeof(float);
+    if (bb_write(&bin, normals, nor_len) != 0) goto oom;
+
+    /* COLOR_0 (u8 normalized RGBA) */
     size_t col_off = 0, col_len = 0;
     if (has_color) {
         if (bb_pad_to_4(&bin, 0) != 0) goto oom;
         col_off = bin.len;
-        col_len = (size_t)Nv * 4 * sizeof(float);
-        if (bb_write(&bin, mesh->vertex_colors, col_len) != 0) goto oom;
+        col_len = (size_t)Nv * 4 * sizeof(uint8_t);
+        if (bb_write(&bin, colors_u8, col_len) != 0) goto oom;
     }
 
     /* indices */
@@ -180,13 +279,12 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
     if (use_u32) {
         if (bb_write(&bin, mesh->faces, idx_len) != 0) goto oom;
     } else {
-        /* Convert i32 -> u16 inline. */
         uint16_t *tmp = (uint16_t *)malloc(idx_len);
         if (!tmp) goto oom;
         for (int i = 0; i < Ni; i++) {
             int32_t v = mesh->faces[i];
             if (v < 0 || v > 65535) {
-                free(tmp);
+                free(tmp); free(normals); free(colors_u8);
                 iris_set_error("lrm_mesh_save_glb: index out of u16 range");
                 free(bin.data);
                 return -1;
@@ -197,49 +295,86 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
         free(tmp);
         if (rc != 0) goto oom;
     }
-
-    /* glTF spec requires both chunks be 4-byte aligned in the file;
-     * pad the binary chunk too. */
+    /* glTF spec requires both chunks be 4-byte aligned in the file. */
     if (bb_pad_to_4(&bin, 0) != 0) goto oom;
 
-    /* Build the JSON chunk. */
+    /* Done with the per-vertex scratch. */
+    free(normals);   normals   = NULL;
+    free(colors_u8); colors_u8 = NULL;
+
+    /* ----- Build the JSON chunk. Accessor indices:
+     *   0  POSITION
+     *   1  NORMAL
+     *   2  COLOR_0    (only if has_color)
+     *   N  indices    (last; N = 2 with color, 1 without)
+     */
+    /* Accessor indices used in the JSON below. */
+    const int  acc_pos  = 0;
+    const int  acc_nor  = 1;
+    /* acc_col = 2 when has_color (referenced inline in the JSON). */
+    const int  acc_idx  = has_color ? 3 : 2;
+
     bytebuf js = {0};
     if (bb_printf(&js,
         "{\"asset\":{\"version\":\"2.0\",\"generator\":\"lrm.c\"},"
         "\"scene\":0,"
         "\"scenes\":[{\"nodes\":[0]}],"
         "\"nodes\":[{\"mesh\":0}],"
+        "\"materials\":[{"
+        /* PBR matte material; vertex COLOR_0 is multiplied into the
+         * baseColorFactor by viewers per the glTF 2.0 spec. */
+        "\"name\":\"lrm_default\","
+        "\"pbrMetallicRoughness\":{"
+        "\"baseColorFactor\":[1,1,1,1],"
+        "\"metallicFactor\":0,"
+        "\"roughnessFactor\":1"
+        "},"
+        "\"doubleSided\":true"
+        "}],"
         "\"meshes\":[{\"primitives\":[{"
-        "\"attributes\":{\"POSITION\":0%s},"
+        "\"attributes\":{\"POSITION\":%d,\"NORMAL\":%d%s},"
         "\"indices\":%d,"
+        "\"material\":0,"
         "\"mode\":%d"
         "}]}],"
-        "\"accessors\":["
-        /* 0: POSITION */
+        "\"accessors\":[",
+        acc_pos, acc_nor,
+        has_color ? ",\"COLOR_0\":2" : "",
+        acc_idx,
+        GLTF_MODE_TRIANGLES) != 0) goto oom_js;
+
+    /* Accessor 0: POSITION. */
+    if (bb_printf(&js,
         "{\"bufferView\":0,\"componentType\":%d,\"count\":%d,\"type\":\"VEC3\","
         "\"min\":[%.8g,%.8g,%.8g],\"max\":[%.8g,%.8g,%.8g]}",
-        has_color ? ",\"COLOR_0\":1" : "",
-        has_color ? 2 : 1,
-        GLTF_MODE_TRIANGLES,
         GLTF_COMP_F32, Nv,
         (double)mn[0], (double)mn[1], (double)mn[2],
         (double)mx[0], (double)mx[1], (double)mx[2]) != 0) goto oom_js;
-
+    /* Accessor 1: NORMAL. */
+    if (bb_printf(&js,
+        ",{\"bufferView\":1,\"componentType\":%d,\"count\":%d,\"type\":\"VEC3\"}",
+        GLTF_COMP_F32, Nv) != 0) goto oom_js;
+    /* Accessor 2: COLOR_0 (u8 normalized) - only if present. */
     if (has_color) {
         if (bb_printf(&js,
-            ",{\"bufferView\":1,\"componentType\":%d,\"count\":%d,\"type\":\"VEC4\"}",
-            GLTF_COMP_F32, Nv) != 0) goto oom_js;
+            ",{\"bufferView\":2,\"componentType\":%d,"
+            "\"normalized\":true,\"count\":%d,\"type\":\"VEC4\"}",
+            GLTF_COMP_U8, Nv) != 0) goto oom_js;
     }
+    /* Last accessor: indices. */
     if (bb_printf(&js,
         ",{\"bufferView\":%d,\"componentType\":%d,\"count\":%d,\"type\":\"SCALAR\"}"
         "],",
-        has_color ? 2 : 1, idx_comp, Ni) != 0) goto oom_js;
+        has_color ? 3 : 2, idx_comp, Ni) != 0) goto oom_js;
 
     /* bufferViews. */
     if (bb_printf(&js, "\"bufferViews\":[") != 0) goto oom_js;
     if (bb_printf(&js,
         "{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu,\"target\":%d}",
         pos_off, pos_len, GLTF_TARGET_ARRAY) != 0) goto oom_js;
+    if (bb_printf(&js,
+        ",{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu,\"target\":%d}",
+        nor_off, nor_len, GLTF_TARGET_ARRAY) != 0) goto oom_js;
     if (has_color) {
         if (bb_printf(&js,
             ",{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu,\"target\":%d}",
@@ -319,6 +454,10 @@ fail_io:
 oom_js:
     free(js.data);
 oom:
+    /* normals / colors_u8 may still be live if we OOM'd while writing
+     * the BIN chunk (they are freed and nulled after BIN completes). */
+    free(normals);
+    free(colors_u8);
     free(bin.data);
     iris_set_error("lrm_mesh_save_glb: out of memory");
     return -1;

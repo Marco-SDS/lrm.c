@@ -192,17 +192,37 @@ int main(void) {
     } else {
         fprintf(stderr, "  PASS JSON braces+brackets balanced\n");
     }
-    /* Sanity-check that key fields appear. */
+    /* Sanity-check that key fields appear. Phase 12.5 added NORMAL and a
+     * materials block, and switched COLOR_0 to u8 normalized; verify all
+     * of that is present. */
+    int has_normal = 0, has_material = 0, has_normalized = 0;
     if (memmem(js, js_len, "\"POSITION\"", 10)) has_position = 1;
+    if (memmem(js, js_len, "\"NORMAL\"",   8))  has_normal   = 1;
     if (memmem(js, js_len, "\"COLOR_0\"", 9))   has_colors   = 1;
     if (memmem(js, js_len, "\"indices\"", 9))   has_indices  = 1;
-    if (!has_position || !has_colors || !has_indices) {
+    if (memmem(js, js_len, "\"materials\"", 11)) has_material = 1;
+    if (memmem(js, js_len, "\"normalized\":true", 17)) has_normalized = 1;
+    if (!has_position || !has_normal || !has_colors || !has_indices) {
         fprintf(stderr,
-                "  FAIL: JSON missing attribute keys (POSITION=%d, COLOR_0=%d, indices=%d)\n",
-                has_position, has_colors, has_indices);
+                "  FAIL: JSON missing attribute (POSITION=%d, NORMAL=%d, "
+                "COLOR_0=%d, indices=%d)\n",
+                has_position, has_normal, has_colors, has_indices);
         fails++;
     } else {
-        fprintf(stderr, "  PASS JSON has POSITION + COLOR_0 + indices\n");
+        fprintf(stderr, "  PASS JSON has POSITION + NORMAL + COLOR_0 + indices\n");
+    }
+    if (!has_material) {
+        fprintf(stderr, "  FAIL: JSON missing materials block\n");
+        fails++;
+    } else {
+        fprintf(stderr, "  PASS JSON has PBR materials block\n");
+    }
+    if (!has_normalized) {
+        fprintf(stderr, "  FAIL: COLOR_0 not marked normalized (u8) - "
+                        "expected switch to u8 normalized in Phase 12.5\n");
+        fails++;
+    } else {
+        fprintf(stderr, "  PASS COLOR_0 marked normalized (u8)\n");
     }
 
     /* BIN chunk. */
@@ -221,14 +241,17 @@ int main(void) {
         } else {
             fprintf(stderr, "  PASS second chunk BIN (%u bytes)\n", bin_len);
         }
+        /* Expected payload: POSITION + NORMAL + COLOR_0(u8) + u16 indices,
+         * each padded to 4 bytes. */
         size_t expected = (size_t)Nv * 3 * sizeof(float)       /* POSITION */
-                        + (size_t)Nv * 4 * sizeof(float)       /* COLOR_0 */
+                        + (size_t)Nv * 3 * sizeof(float)       /* NORMAL */
+                        + (size_t)Nv * 4 * sizeof(uint8_t)     /* COLOR_0 */
                         + (size_t)Nf * 3 * 2;                   /* u16 indices */
-        /* Padding: u16 indices block needs to round up to 4 bytes if odd. */
+        /* Each block aligns to 4 bytes; allow a few bytes slop. */
         expected = (expected + 3) & ~(size_t)3;
-        if (bin_len < expected || bin_len > expected + 3) {
+        if (bin_len < expected || bin_len > expected + 12) {
             fprintf(stderr,
-                    "  FAIL: BIN length %u, expected ~%zu (POS+COLOR+IDX padded)\n",
+                    "  FAIL: BIN length %u, expected ~%zu (POS+NOR+COLOR+IDX padded)\n",
                     bin_len, expected);
             fails++;
         } else {
@@ -240,8 +263,8 @@ int main(void) {
     free(buf);
 
     if (fails == 0) {
-        printf("\nPASS  GLB writer structure (%d/%d checks); file at %s\n",
-               9, 9, kOutPath);
+        printf("\nPASS  GLB writer structure (12 checks); file at %s\n",
+               kOutPath);
         return 0;
     }
     fprintf(stderr, "\nFAIL  GLB writer (%d structural checks failed)\n", fails);
