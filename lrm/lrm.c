@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ========================================================================
  * Lifecycle
@@ -50,11 +51,43 @@ void lrm_free(lrm_model *m) {
  * Inference
  * ======================================================================== */
 
-/* Optional progress reporting hook. Kept tiny - the CLI prints stage
- * headlines via stderr; nothing else listens yet. */
+/* Optional progress / timing reporting. Set LRM_TIMING=1 in the
+ * environment to get per-stage walltime to stderr; without the env
+ * var only the stage banners print. */
+static double clock_ms_internal(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
+}
+
+static int timing_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("LRM_TIMING");
+        cached = (v && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+static double g_last_stage_ms = 0.0;
+
 static void stage(const char *msg) {
+    double now = clock_ms_internal();
+    if (timing_enabled() && g_last_stage_ms > 0.0) {
+        fprintf(stderr, "lrmc:   (prev stage: %7.1f ms)\n",
+                now - g_last_stage_ms);
+    }
     fprintf(stderr, "lrmc: %s\n", msg);
     fflush(stderr);
+    g_last_stage_ms = now;
+}
+
+static void stage_done(void) {
+    if (timing_enabled() && g_last_stage_ms > 0.0) {
+        fprintf(stderr, "lrmc:   (last stage: %7.1f ms)\n",
+                clock_ms_internal() - g_last_stage_ms);
+    }
+    g_last_stage_ms = 0.0;
 }
 
 /* Build the density volume by chunked sample+MLP over the MC grid.
@@ -208,6 +241,9 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
      * which is already set from m->radius at load. */
     (void)radius;
 
+    /* Reset stage timing for a fresh inference. */
+    g_last_stage_ms = 0.0;
+
     /* ----- 1. Preprocess image to CHW float in [0, 1]. */
     stage("preprocess: foreground composite + 512x512 resize");
     const int cond = m->cond_image_size;
@@ -356,10 +392,9 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
      * double-free. */
     mc.vertices = NULL;
     mc.faces    = NULL;
-    /* lrm_mc_mesh_free with NULL pointers is safe and does the
-     * housekeeping. */
     lrm_mc_mesh_free(&mc);
 
+    stage_done();
     return mesh;
 }
 

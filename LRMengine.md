@@ -646,6 +646,32 @@ revisit the design before adding new models.
 The PyTorch baseline numbers go in `docs/PERFORMANCE.md` so we are
 honest about the speedup.
 
+### 11.1 Current measured baseline (Phase 14, 2026-05-22)
+
+Measured on the only CPU on hand (Intel i9-9880H + Accelerate, BLAS
+backend). Full per-stage breakdown lives in `SPEED.md`; the headline
+numbers:
+
+| Resolution | DINO | Decoder | Density grid | Total | Output |
+|------------|-----:|--------:|-------------:|------:|-------:|
+| 64³ (golden) | 2.6 s | 47.2 s | 0.5 s | **50.4 s** | 4,520 verts |
+| 256³ (prod)  | 2.7 s | 49.7 s | 30.5 s | **83.3 s** | 75,918 verts |
+
+The triplane decoder dominates (60–94 %), running at Accelerate sgemm
+bandwidth limit (~22 GFLOPS sustained, the implementation is at the
+BLAS floor). The density-grid MLP is the second hotspot at 256³
+(37 % of total).
+
+**Gap to targets**: the 3 s M3+Metal target requires Phase 13 (Metal
+sgemm for decoder Q/K/V/GEGLU + tiled grid_sample/MLP); the 8 s
+i7-12700+OpenBLAS target is plausibly within reach with
+multi-threaded OpenBLAS (rough estimate: ~25 s on i7-12700 vs ~50 s
+on i9-9880H laptop). Memory (~2 GB peak at 256³) and binary size
+(~210 KB) are well under their respective ceilings.
+
+`docs/PERFORMANCE.md` and PyTorch comparison are deferred to Phase
+17 release hardening.
+
 ---
 
 ## 12. Critical technical decisions
