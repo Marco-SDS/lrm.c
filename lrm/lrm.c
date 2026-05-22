@@ -1,10 +1,8 @@
 /*
  * lrm.c - LRM coordinator: dispatch table for model-kind specific code.
  *
- * Phase 5 state: lrm_load() routes to the TripoSR loader (only model kind
- * currently supported); lrm_free() releases the model. lrm_infer() and
- * lrm_mesh_save_glb() are still stubs - their implementations come in
- * Phases 6-11.
+ * Phase 11 state: load/free/save_glb are live, lrm_infer is still a
+ * stub awaiting Phase 12 (the end-to-end pipeline wiring + CLI).
  *
  * When a second model kind lands (OpenLRM in Phase 15), this file gains a
  * dispatch table keyed on a `kind` field in struct lrm_model.
@@ -39,23 +37,9 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
     (void)im;
     (void)opts;
     iris_set_error(
-        "lrm_infer: not implemented yet "
-        "(Phases 6-10 - encoder, decoder, sampler, MC)");
+        "lrm_infer: end-to-end pipeline wiring lands in Phase 12; "
+        "individual stages (encoder/decoder/sampler/MC/GLB) are all tested.");
     return NULL;
 }
 
-/* ========================================================================
- * Mesh I/O
- * ======================================================================== */
-
-int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
-    (void)mesh;
-    (void)path;
-    iris_set_error("lrm_mesh_save_glb: not implemented yet (Phase 11 - GLB)");
-    return -1;
-}
-
-void lrm_mesh_free(lrm_mesh *mesh) {
-    (void)mesh;
-    /* No state to release yet. */
-}
+/* lrm_mesh_save_glb and lrm_mesh_free live in lrm_mesh_export.c. */
