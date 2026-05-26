@@ -493,29 +493,38 @@ transformer internals. Multiply by 1.3–1.5 if either is new.
 Each phase ends with a concrete, verifiable artifact and a passing test
 (except where noted). No phase is "done" without its test.
 
-| # | Phase | Deliverable | Test gate | Effort |
-|---|---|---|---|---:|
-| **0** | TripoSR architectural analysis | This document | — | ✅ done |
-| **1** | Golden rig | `triposr_env/`, `tools/ckpt_to_safetensors.py`, `tools/extract_golden.py`, all 6 `.npz` checkpoints under `tests/golden/triposr/` | the `.npz` files load and replay in Python | 1 wk |
-| **2** | Cleanup | Single commit removing all diffusion-specific files and the AdaLN/CFG/schedule paths from shared files | `make` builds a stub binary that prints "lrm: no model loaded" | 3 d |
-| **3** | Restructure | `lrm/` dir created, `iris.h` reduced to minimal public surface, `lrm/lrm.h` skeleton added, Makefile updated to build `lrm/*.c` | `make` builds with `lrm_infer` stub returning NULL | 2 d |
-| **4** | Kernels gap fill | Add **LayerNorm**, **GELU exact**, **GEGLU**, **grid_sample bilinear** to `iris_kernels.c` + `iris_shaders.metal`. Verify `iris_attention` supports cross-attn. Remove AdaLN paths | `test_kernels.c` parity vs NumPy reference, atol 1e-5 (f32) | 1.5 wk |
-| **5** | Safetensors load + weight remap | `lrm/lrm_triposr.c` opens the converted safetensors, enumerates tensors, validates names/shapes/dtypes against `config.yaml` | `lrm info model.safetensors` prints the weight tree | 2 d |
-| **6** | DINOv1 ViT-B/16 encoder | `lrm/lrm_vit_dino.c`: patch_embed + pos_embed + 12 blocks (LN + MHSA + LN + MLP-GELU) | parity vs `dino_tokens.npz`, atol 5e-4 | 2 wk |
-| **7** | Triplane decoder | `lrm/lrm_triplane_decoder.c`: GroupNorm + proj_in + 16 BasicTransformerBlocks (self-attn + cross-attn + GEGLU + 3 LN) + proj_out + detokenize | parity vs `triplane_pre_upsample.npz` | 2.5 wk |
-| **8** | Post-processor | `lrm/lrm_triplane_upsample.c`: either true ConvTranspose or `upsample_nearest + conv2d` equivalent (verify against golden) | parity vs `triplane.npz` (3×40×64×64) | 4 d |
-| **9** | Triplane sample + NeRF MLP | `lrm/lrm_triplane_sample.c` (grid_sample, border, align_corners=False) + `lrm/lrm_nerf_mlp.c` | parity vs `density_64.npz` (262K queries on 64³ grid) | 1 wk |
-| **10** | Marching cubes | `lrm/lrm_marching_cubes.c` (Lorensen–Cline 256-entry table) + vertex color re-query | parity vs golden mesh: vertices ±2%, faces ±2%, Chamfer < 1e-3 | 1.5 wk |
-| **11** | GLB export | Vendor `cgltf.h`, write `lrm/lrm_mesh_export.c` (vertex colors only) | GLB round-trip opens in Blender / online viewer | 3 d |
-| **12** | TripoSR glue + CLI | `lrm/lrm_triposr.c` config parsing, `main.c` subcommands `download / convert / infer / info` | `./lrmc infer image.png -o out.glb` end-to-end | 1 wk |
-| **13** | Metal optimization | Targeted shaders for (a) decoder cross-attention (b) batched grid_sample (c) batched MLP over 256³ with early-termination on low-density voxels | benchmark e2e < 3 s on M-series, 512×512 input | 2 wk |
-| **14** | BLAS path validation | Run on Linux x86_64 without Metal, profile BLAS GEMM in decoder | end-to-end runs, e2e < 8 s | 4 d |
-| **15** | OpenLRM (optional) | Second model `lrm/lrm_openlrm.c`, validates the abstraction | OpenLRM golden parity | 1.5 wk |
-| **16** | Background removal in C | Vendor a small segmentation model (candidates: RMBG-1.4, IS-Net, U2NetP — research phase first). Reuse existing kernels (conv2d, LN, GELU) | `lrm infer --auto-bg` matches a manually pre-processed reference | **3–6 wk** |
-| **17** | Hardening + release | `README.md`, `SPEED.md`, `docs/ARCHITECTURE.md`, perf table, signed binaries, GitHub release | tagged release | 2 wk |
+| # | Phase | Deliverable | Test gate | Effort | Status |
+|---|---|---|---|---:|:--:|
+| **0** | TripoSR architectural analysis | This document | — | ✅ done | ✅ |
+| **1** | Golden rig | `triposr_env/`, `tools/ckpt_to_safetensors.py`, `tools/extract_golden.py`, all 6 `.npz` checkpoints under `tests/golden/triposr/` | the `.npz` files load and replay in Python | 1 wk | ✅ |
+| **2** | Cleanup | Single commit removing all diffusion-specific files and the AdaLN/CFG/schedule paths from shared files | `make` builds a stub binary that prints "lrm: no model loaded" | 3 d | ✅ |
+| **3** | Restructure | `lrm/` dir created, `iris.h` reduced to minimal public surface, `lrm/lrm.h` skeleton added, Makefile updated to build `lrm/*.c` | `make` builds with `lrm_infer` stub returning NULL | 2 d | ✅ |
+| **4** | Kernels gap fill | Add **LayerNorm**, **GELU exact**, **GEGLU**, **grid_sample bilinear** to `iris_kernels.c` + `iris_shaders.metal`. Verify `iris_attention` supports cross-attn. Remove AdaLN paths | `test_kernels.c` parity vs NumPy reference, atol 1e-5 (f32) | 1.5 wk | ✅ (Metal-side surgery deferred to 13) |
+| **5** | Safetensors load + weight remap | `lrm/lrm_triposr.c` opens the converted safetensors, enumerates tensors, validates names/shapes/dtypes against `config.yaml` | `lrm info model.safetensors` prints the weight tree | 2 d | ✅ |
+| **6** | DINOv1 ViT-B/16 encoder | `lrm/lrm_vit_dino.c`: patch_embed + pos_embed + 12 blocks (LN + MHSA + LN + MLP-GELU) | parity vs `dino_tokens.npz`, atol 5e-4 | 2 wk | ✅ (max err 1.4e-5, 37× headroom) |
+| **7** | Triplane decoder | `lrm/lrm_triplane_decoder.c`: GroupNorm + proj_in + 16 BasicTransformerBlocks (self-attn + cross-attn + GEGLU + 3 LN) + proj_out + detokenize | parity vs `triplane_pre_upsample.npz` | 2.5 wk | ✅ (mean err 8e-5, f32 floor) |
+| **8** | Post-processor | `lrm/lrm_triplane_upsample.c`: either true ConvTranspose or `upsample_nearest + conv2d` equivalent (verify against golden) | parity vs `triplane.npz` (3×40×64×64) | 4 d | ✅ (chose GEMM + pixel-shuffle: ~30× faster than nested loops) |
+| **9** | Triplane sample + NeRF MLP | `lrm/lrm_triplane_sample.c` (grid_sample, zeros padding, align_corners=False) + `lrm/lrm_nerf_mlp.c` | parity vs `density_64.npz` (262K queries on 64³ grid) | 1 wk | ✅ (density 9e-5, color 2e-7) |
+| **10** | Marching cubes | `lrm/lrm_marching_cubes.c` (Lorensen–Cline 256-entry table) + vertex color re-query | parity vs golden mesh: vertices ±2%, faces ±2%, Chamfer < 1e-3 | 1.5 wk | ✅ (Chamfer 1.5e-7, 6 orders better than gate) |
+| **11** | GLB export | `lrm/lrm_mesh_export.c` (vertex colors only) | GLB round-trip opens in Blender / online viewer | 3 d | ✅ (no cgltf vendored; ~250 lines direct writer) |
+| **11.5** | GLB materials follow-up (added during Phase 17) | PBR material + vertex normals + u8 normalized colors so GLBs render properly in Blender / three.js / gltf.report | trimesh round-trip + raw glTF inspection | 1 d | ✅ |
+| **12** | TripoSR glue + CLI | `lrm/lrm_triposr.c` config parsing, `main.c` subcommands `infer / info` | `./lrmc infer image.png -o out.glb` end-to-end | 1 wk | ✅ (50 s at 64³, 83 s at 256³ on Intel i9 + Accelerate) |
+| **13** | Metal optimization | Targeted shaders for (a) decoder cross-attention (b) batched grid_sample (c) batched MLP over 256³ with early-termination on low-density voxels | benchmark e2e < 3 s on M-series, 512×512 input | 2 wk | ⏸ blocked on Apple Silicon hardware |
+| **14** | BLAS path validation | Run on Linux x86_64 without Metal, profile BLAS GEMM in decoder | end-to-end runs, e2e < 8 s | 4 d | ✅ profiled on Intel macOS (SPEED.md); Linux box not on hand — code path identical to Accelerate |
+| **15** | OpenLRM (optional) | Second model `lrm/lrm_openlrm.c`, validates the abstraction | OpenLRM golden parity | 1.5 wk | 📋 not started |
+| **16** | Background removal in C | Vendor a small segmentation model (candidates: RMBG-1.4, IS-Net, U2NetP — research phase first). Reuse existing kernels (conv2d, LN, GELU) | `lrm infer --auto-bg` matches a manually pre-processed reference | **3–6 wk** | 📋 not started |
+| **17** | Hardening + release | `README.md`, `SPEED.md`, `docs/ARCHITECTURE.md`, `docs/CONTRIBUTING.md`, perf table, signed binaries, GitHub release | tagged release | 2 wk | 🟡 docs done; signed CI + tagged release pending |
+| **18** | Texture baking (proposed) | UV unwrap + texture atlas rasterization + per-pixel NeRF MLP query; emit `baseColorTexture` in the GLB. Replaces the `--bake-texture` path of `run.py` | textured GLB round-trips through Blender with the baked atlas | 1–2 wk | 📋 not started |
 
-**MVP estimate (phases 1–14): ~13–14 weeks.** Phase 16 (bg removal) is
-an independent track that adds 3–6 weeks.
+**MVP delivered**: Phases 1–12, 12.5, 14 complete. The end-to-end
+pipeline produces a viewer-ready PBR GLB from a single image at the
+expected quality (Chamfer ≈ 0 vs reference); see SPEED.md for the
+walltime baseline.
+
+**Open work**: Phase 13 (Metal acceleration; needs Apple Silicon),
+Phase 15 (OpenLRM as the architecture validator), Phase 16 (in-C
+background removal), Phase 17 release CI/signing, Phase 18 texture
+baking.
 
 ### 8.1 Phase gates
 

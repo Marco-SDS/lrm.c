@@ -25,6 +25,7 @@ documents/
 *.swo
 *~
 .DS_Store
+Thumbs.db
 
 # Build artifacts
 *.a

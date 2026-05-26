@@ -1,394 +1,237 @@
-This is a C implementation of two image synthesis model families:
-- Flux.2 Klein (4B and 9B variants)
-- Z-Image-Turbo (6B)
+This is a C implementation of LRM-family image-to-3D inference, starting
+with TripoSR. The project is a fork of `antirez/iris.c` (originally an
+image-generation engine for Flux and Z-Image) stripped down and
+specialized for single-view 3D reconstruction.
 
-The project is called "Iris" (from the Greek goddess of the rainbow).
-The Flux models are created by Black Forest Labs.
-Z-Image-Turbo is published as `Tongyi-MAI/Z-Image-Turbo`.
+The project is called **lrm.c**.
+The binary is **lrmc** (the directory `lrm/` houses the model code, so
+the binary name has the trailing `c` of the project name to avoid the
+filesystem collision; see LRMengine.md §3).
 
-Model type and architecture are autodetected from model metadata/config files.
-Do not rely on hardcoded dimensions when a config value is available.
+# High-level capabilities (MVP, Phase 12.5 complete)
 
-# Naming Convention
-
-- **`iris_`** prefix for all shared/generic identifiers
-- **`_flux`** postfix on internal functions/types specific to the Flux model family
-- **`_zimage`** postfix on internal functions/types specific to Z-Image
-- **No postfix** on public API functions (they route internally by model type)
-- **Unchanged**: `qwen3_*`, `safetensors_*`, `zi_*` internal helpers (component-level namespaces)
-
-# Supported Model Variants
-
-Flux variants:
-- **4B Distilled** (`flux-klein-4b`): 4 steps, no CFG, fast.
-- **4B Base** (`flux-klein-4b-base`): 50 steps default, CFG, higher quality but much slower.
-- **9B Distilled** (`flux-klein-9b`): 4 steps, larger model, higher quality. Non-commercial license.
-- **9B Base** (`flux-klein-9b-base`): 50 steps default, CFG. Non-commercial license.
-
-Z-Image variant:
-- **Z-Image-Turbo** (`zimage-turbo`): distilled S3-DiT model, default 8 NFE (9 scheduler values), guidance 0.0.
-
-# High-Level Capabilities
-
-- Flux supports both txt2img and img2img with text conditioning.
-- Z-Image currently supports txt2img path in this codebase.
-- Text embeddings are generated via Qwen3.
-- VAE is used for latent/image conversion in both families.
-
-# File Structure
+Single end-to-end command:
 
 ```
-iris.c                    - Main library (model load, generation routing)
-iris_transformer_flux.c   - Flux diffusion transformer (MMDiT)
-iris_transformer_zimage.c - Z-Image transformer (S3-DiT)
-iris_sample.c             - Sampling/denoising loops (Euler ODE)
-iris_qwen3.c              - Qwen3 text encoder
-iris_qwen3_tokenizer.c    - BPE tokenizer
-iris_vae.c                - VAE encoder/decoder
-iris_kernels.c            - CPU kernels (softmax, RMSNorm, etc.)
-iris_metal.m              - Metal GPU acceleration runtime
-iris_metal.h              - Metal/GPU API surface
-iris_shaders.metal        - Metal compute kernels
-iris_safetensors.c        - Weight loading
-iris_image.c              - Image I/O (PNG/PPM/JPEG)
-png.c                     - PNG encoder/decoder
-jpeg.c                    - JPEG decoder
-iris_cli.c                - Interactive CLI mode (REPL)
-embcache.c                - Embedding cache (4-bit quantized)
-linenoise.c               - Line editing library
-terminals.c               - Terminal handling
-main.c                    - CLI entry point
+./lrmc infer <model_dir> <image> -o <output.glb> [--mc-resolution N]
 ```
 
-# Build Targets
+produces a binary glTF 2.0 file with PBR material, vertex normals, and
+vertex colors. The pipeline is image → DINO ViT-B/16 → 16-block triplane
+decoder → ConvTranspose upsample → density grid (sample + NeRF MLP) →
+marching cubes → color re-query → GLB.
 
-This project implements three targets:
-- MPS: Apple Silicon GPU path.
-- BLAS: optimized CPU inference via BLAS/OpenBLAS.
-- generic: pure C fallback, very slow.
+All pipeline stages are validated stage-by-stage against the canonical
+PyTorch reference (see `tests/` and the per-stage commit messages on
+the `features` branch).
 
-# Development Rules
+# Naming convention (post-fork)
 
-- No additional project dependencies. Acceptable external deps are BLAS/OpenBLAS and Metal/MPS from macOS.
+- **`iris_`** prefix for all shared/generic identifiers (kernels,
+  safetensors, image I/O) — inherited from the parent project.
+- **`lrm_`** prefix for everything model-specific under `lrm/`.
+- Files under `lrm/` may include root headers; root code never
+  includes from `lrm/`. Unidirectional dependency.
+
+# File structure
+
+```
+iris.c               - generic coordinator (error string, dispatch)
+iris.h               - minimal public API (image I/O, opaque types)
+iris_kernels.c/.h    - CPU compute primitives (matmul, attention, conv2d,
+                       LN/GN/BN, GELU/GEGLU/SiLU, grid_sample, RoPE)
+iris_metal.m/.h      - Metal runtime (kept; kernels TBD in Phase 13)
+iris_shaders.metal   - Metal compute shaders (kept; trimmed in Phase 13)
+iris_safetensors.c/.h - mmap'd weight loader (zero-copy)
+iris_image.c         - PNG/JPEG/PPM image I/O
+png.c/.h jpeg.c/.h   - codec headers (vendored single-file libs)
+main.c               - CLI entry point
+
+lrm/                 - ALL LRM-specific code
+  lrm.c/.h           - public LRM API + end-to-end orchestration
+  lrm_triposr.c/.h   - TripoSR loader + image preprocessing
+  lrm_vit_dino.c/.h  - DINOv1 ViT-B/16 encoder
+  lrm_triplane_decoder.c/.h    - 16-block transformer (self+cross+GEGLU)
+  lrm_triplane_upsample.c/.h   - ConvTranspose2d via packed GEMM + pixel shuffle
+  lrm_triplane_sample.c/.h     - per-point bilinear sampling, 3 planes -> 120-d
+  lrm_nerf_mlp.c/.h            - 10-layer NeRF MLP (density + RGB)
+  lrm_marching_cubes.c/.h      - Lorensen-Cline MC + global-edge dedup
+  lrm_mesh_export.c/.h         - binary glTF 2.0 writer (PBR material, normals)
+
+tests/               - parity tests per module
+  test_kernels.c
+  test_vit_dino.c
+  test_triplane_decoder.c
+  test_triplane_upsample.c
+  test_density_64.c
+  test_marching_cubes.c
+  test_glb.c
+  golden/triposr/    - pinned reference goldens (gitignored)
+
+tools/               - dev-time Python helpers (NOT in hot path)
+  ckpt_to_safetensors.py
+  extract_golden.py
+  check_glb.py
+
+docs/                - architectural reference + dev guide
+  ARCHITECTURE.md
+  CONTRIBUTING.md
+
+triposr_env/         - pinned TripoSR Python repo + venv (gitignored)
+LRMengine.md         - canonical project plan + decisions log + roadmap
+README.md            - user-facing intro + quickstart
+SPEED.md             - measured performance baseline
+```
+
+# Build targets
+
+```
+make generic   - Pure C, no system deps. Slow (~10x). Always works.
+make blas      - Accelerate (macOS) / OpenBLAS (Linux). Default.
+make mps       - Apple Silicon + Metal. Build set up; kernels TBD (Phase 13).
+```
+
+Per-module parity tests (each pulls in only the .c files it needs):
+
+```
+make test           - kernel parity (atol=1e-5 vs NumPy)
+make test-dino      - DINO forward parity (atol=5e-4 vs PyTorch)
+make test-decoder   - triplane decoder parity (atol=4e-3 rtol=1e-4)
+make test-upsample  - post-processor parity (atol=5e-4 rtol=1e-4)
+make test-density   - sampler + NeRF MLP on 64^3 grid
+make test-mc        - marching cubes structural (count + area + Chamfer)
+make test-glb       - GLB writer structural + trimesh round-trip
+make test-e2e       - end-to-end TripoSR inference (~50 s on i9 CPU)
+```
+
+# Performance baseline (Phase 14, 2026-05-22)
+
+On Intel i9-9880H + Accelerate (BLAS), end-to-end TripoSR inference on
+the canonical robot.png golden image:
+
+- 64³ MC resolution:  ~50 s total (decoder ~47 s = 93 %)
+- 256³ MC resolution: ~83 s total (decoder ~50 s + density ~30 s)
+
+The triplane decoder is BLAS-bandwidth-bound at ~22 GFLOPS sustained.
+Closing the gap to the LRMengine.md §11 targets (3 s on M3 + Metal)
+requires Phase 13.
+
+See [SPEED.md](SPEED.md) for the full per-stage breakdown.
+
+# Development rules
+
+- No additional project dependencies. Acceptable external deps are
+  BLAS/OpenBLAS and Metal/MPS from macOS.
 - Reject tiny speed gains that add complexity; prefer substantial wins.
-- Always test code modifications with `make test`.
+- Always test code modifications with `make test` and the relevant
+  per-stage test. Run `make test-e2e` before committing anything that
+  touches the pipeline.
 - Once changes are validated, commit them.
 - Never add or commit unrelated unstaged files.
 - Keep code simple and understandable; leave no dead code.
 - If you optimize one backend, verify others were not regressed.
-- Stick to standard C; avoid compiler-specific tricks/pragmas unless strictly required.
+- Stick to standard C; avoid compiler-specific tricks/pragmas unless
+  strictly required.
+- Plan-level decisions live in [LRMengine.md §3](LRMengine.md). Re-open
+  them only with explicit justification recorded as a new dated entry.
 
-# How To Run
+# How to run TripoSR inference
 
-Flux examples:
+```bash
+make blas
 
-    ./iris -d flux-klein-4b -p "a cat and a dog playing" -o /tmp/test.png
-    ./iris -d flux-klein-4b-base -p "a cat and a dog playing" -o /tmp/test.png
-    ./iris -d flux-klein-9b -p "a cat and a dog playing" -o /tmp/test.png
-    ./iris -d flux-klein-9b-base -p "a cat and a dog playing" -o /tmp/test.png
+# Once: convert the upstream ckpt to safetensors (the engine reads
+# only safetensors; conversion is a one-shot Python script).
+triposr_env/.venv/bin/python tools/ckpt_to_safetensors.py \
+    ~/.cache/huggingface/.../model.ckpt triposr_env/model.safetensors
 
-Z-Image example:
+# Inference (~50 s at 64^3 on Intel i9 + Accelerate).
+./lrmc infer triposr_env triposr_env/examples/robot.png \
+    -o /tmp/robot.glb --mc-resolution 64
 
-    ./iris -d zimage-turbo -p "a fish" -o /tmp/zimage.png
+# Open /tmp/robot.glb in any glTF viewer (Blender, gltf.report, etc.).
+```
 
-If model weights are missing, use the download script only after user approval.
+Set `LRM_TIMING=1` in the env to get per-stage walltime breakdown.
 
-# Python Reference Implementations
+# Python reference implementations
 
-For parity checks/debugging:
+For parity checks / debugging:
 
-Flux references:
-- Python venv in `./flux_env/`
-- Official Flux Python code in `./flux2/`
+TripoSR references (pinned):
+- Python venv in `./triposr_env/.venv/`
+- Official TripoSR code in `./triposr_env/tsr/` (commit `d26e33181`)
+- HuggingFace weights: `stabilityai/TripoSR` revision `5b521936b01fbe1890f6f9baed0254ab6351c04a`
+- `tools/extract_golden.py` regenerates the 6 golden tensors used by
+  the parity tests.
 
-Z-Image references:
-- `flux_env/lib/python3.12/site-packages/diffusers/models/transformers/transformer_z_image.py`
-- `flux_env/lib/python3.12/site-packages/diffusers/pipelines/z_image/pipeline_z_image.py`
-- `flux_env/lib/python3.12/site-packages/diffusers/schedulers/scheduling_flow_match_euler_discrete.py`
-- `flux_env/lib/python3.12/site-packages/diffusers/models/autoencoders/autoencoder_kl.py`
+Diffusers references (for Transformer1D + BasicTransformerBlock):
+- `triposr_env/tsr/models/transformer/transformer_1d.py`
+- `triposr_env/tsr/models/transformer/basic_transformer_block.py`
+- `triposr_env/tsr/models/transformer/attention.py`
 
 Rules:
-- Never add/commit `flux_env/` or `flux2/`.
-- If missing, ask user before recreating/downloading.
+- Never add/commit `triposr_env/` (the .gitignore covers it).
+- If missing, ask user before recreating/downloading (~5 GB of deps
+  + 1.7 GB of weights).
 
-# Debugging Notes
+# TripoSR architecture pinned facts
 
-- Reusable debug scripts belong in `./debug`.
-- One-off throwaway debugging tools should be created in `/tmp` and discarded.
-- JPEG code has dedicated tests/tools in `./jpg_test`.
-
-# Flux Pipeline Overview
+(See LRMengine.md §4 for the full reference and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+for per-module deep-dive.)
 
 ```
-1. Text Encoding:    prompt -> Qwen3 -> [512, text_dim] embeddings
-2. Latent Init:      random noise [H/16, W/16, 128]
-3. Denoising Loop:   double blocks -> single blocks -> final layer -> velocity
-4. VAE Decode:       latents -> VAE decoder -> RGB image
-
-img2img: VAE-encode reference images and pass as extra tokens (in-context conditioning).
-
-Base CFG: run transformer twice per step (empty prompt + conditioned prompt):
-v = v_uncond + guidance * (v_cond - v_uncond)
+1. Image preprocessing: alpha bbox + 85 % canvas + composite gray 0.5
+   + bilinear resize to 512x512.
+2. DINO ViT-B/16 (frozen): 12 layers, hidden=768, 12 heads x 64 dim.
+   Output: [1, 1025, 768] (1 CLS + 32x32 patch tokens).
+3. Triplane decoder (Transformer1D, 16 blocks):
+   - GroupNorm(32) + proj_in(1024 -> 1024)
+   - per block: pre-LN(1e-5) + self-attn + +residual
+                + pre-LN + cross-attn(K/V from image tokens 768d) + +residual
+                + pre-LN + GEGLU FFN(1024 -> 8192 split -> 1024) + +residual
+   - proj_out + residual against the cached learned triplane queries
+4. Post-processor: ConvTranspose2d 1024 -> 40, kernel 2, stride 2.
+   Triplane out: [3, 40, 64, 64].
+5. NeRF query: for each 3D point in [-0.87, +0.87]^3, bilinear-sample
+   3 planes (xy, xz, yz; padding_mode='zeros'), concat -> 120-d.
+   NeRF MLP: 10 Linears with SiLU between, output 4 channels.
+   density = exp(raw + density_bias=-1.0), color = sigmoid(features).
+6. Marching cubes at threshold 25.0, default 256^3 grid.
+7. Vertex color re-query + GLB write with PBR material.
 ```
 
-# Flux Key Architecture Constants
+# Critical implementation details (gotchas)
 
-Read from runtime config; reference values:
+- **HF ViT pos-embed interpolation** uses `scale_factor =
+  (target+0.1)/source` (the `+0.1` is HF's FP-precision hack). Skipping
+  it costs ~3-4 decimal places of parity.
+- **GELU is exact** (`erff`-based), not the tanh approximation.
+- **LayerNorm eps**: DINO ViT uses **1e-12**; diffusers
+  BasicTransformerBlock uses default **1e-5**. Don't mix them up.
+- **No bias on Q/K/V** in the decoder (`attention_bias=False`); only
+  `to_out` and `proj_*` carry bias.
+- **GEGLU layout**: `proj(x).chunk(2, -1)` gives `(hidden, gate)`; output
+  is `hidden * gelu(gate)`. The first half is "hidden", the second is "gate".
+- **Transformer1D residual** is added against the **original learned
+  queries**, not the post-GroupNorm version.
+- **TripoSR has NO camera conditioning, NO AdaLN**. Deliberate
+  departure from the LRM paper; the model assumes a canonical orbit view.
+- **grid_sample padding_mode**: TripoSR uses **'zeros'** (PyTorch default).
+  Using 'border' shifts the silhouette outward at the bounding box edges.
+- **Marching cubes axis swap**: TripoSR's `MarchingCubeHelper` applies a
+  `[2, 1, 0]` swap to `torchmcubes`' output because `torchmcubes` treats
+  the input as (depth, height, width). Our C MC emits in natural
+  (i, j, k) order directly, bypassing the round-trip.
+- **GLB vertex colors as u8 normalized**: f32 COLOR_0 is allowed by
+  spec but not universally supported. We quantize at write time.
+- **GLB needs explicit material** for vertex_colors to render reliably
+  across viewers. We emit a single PBR matte (`metallicFactor=0,
+  roughnessFactor=1, doubleSided=true`) so the COLOR_0 attribute is
+  multiplied into the base color.
 
-Flux 4B transformer:
-- hidden=3072
-- heads=24
-- head_dim=128
-- mlp=9216
-- double_blocks=5
-- single_blocks=20
-- text_dim=7680
+# Communication language
 
-Flux 9B transformer:
-- hidden=4096
-- heads=32
-- head_dim=128
-- mlp=12288
-- double_blocks=8
-- single_blocks=24
-- text_dim=12288
-
-Qwen3 (4B/9B encoders used for Flux):
-- 4B: hidden=2560, q_heads=32, kv_heads=8, layers=36, output_dim=7680
-- 9B: hidden=4096, q_heads=32, kv_heads=8, layers=36, output_dim=12288
-
-Shared:
-- latent_ch=128 (Flux latent after patchification)
-- head_dim=128
-
-# Flux Critical Implementation Details
-
-- Concatenation order for attention is `[TEXT, IMAGE]`, not `[IMAGE, TEXT]`.
-- AdaLN formula is `out = (1 + scale) * norm(x) + shift`.
-- Final layer modulation split is `(scale, shift)`, not `(shift, scale)`.
-- RoPE pair rotation is:
-  - `out0 = cos * x0 - sin * x1`
-  - `out1 = cos * x1 + sin * x0`
-
-# Flux RoPE (Rotary Position Embedding)
-
-4-axis RoPE with 32 dims per axis (128 total):
-- Axis 0 (dims 0..31): T position
-- Axis 1 (dims 32..63): H position
-- Axis 2 (dims 64..95): W position
-- Axis 3 (dims 96..127): L sequence index
-
-Token usage:
-- Image tokens: use H/W axes, T/L identity.
-- Text tokens: use L axis only.
-- Reference image tokens (img2img): same as image plus T offset (10, 20, 30...).
-
-# Flux Timestep Embedding
-
-1. Scale timestep by 1000.
-2. Sinusoidal embedding (128 freqs -> 256 dims).
-3. MLP: linear(256->hidden) + SiLU + linear(hidden->hidden).
-
-# Flux Text Encoder (Qwen3)
-
-Chat template:
-```
-<|im_start|>user
-{prompt}<|im_end|>
-<|im_start|>assistant
-<think>
-
-</think>
-
-```
-
-Flux extraction: concatenate layers 8, 17, 26 (0-indexed):
-- 4B: [seq, 7680]
-- 9B: [seq, 12288]
-
-# Flux VAE
-
-- Latent space: 32 channels, 16x spatial compression.
-- Patchify (encode): [B, 32, H/8, W/8] -> [B, 128, H/16, W/16]
-- Unpatchify (decode): [B, 128, H/16, W/16] -> [B, 32, H/8, W/8]
-- Channel multipliers: [1,2,4,4] -> [128,256,512,512]
-
-# Flux Double Block Flow
-
-Input: `img_hidden [img_seq, hidden]`, `txt_hidden [txt_seq, hidden]`
-
-1. AdaLN normalize both streams (shift1, scale1)
-2. Stream-specific Q/K/V projections
-3. QK per-head RMSNorm
-4. RoPE (image axes 1/2, text axis 3)
-5. Joint attention over concatenated KV
-6. Output projection + gate1
-7. Residual add
-8. AdaLN normalize (shift2, scale2)
-9. SiLU-gated MLP
-10. gate2 + residual add
-
-Per-stream modulation params: shift1, scale1, gate1, shift2, scale2, gate2.
-
-# Flux Single Block Flow
-
-Input: concatenated `[txt_hidden, img_hidden]`
-
-1. AdaLN normalize (shift/scale from t_emb)
-2. Fused QKV+MLP projection -> [Q,K,V,gate,up]
-3. QK normalization
-4. RoPE (text uses axis 3, image uses axes 1/2)
-5. Full self-attention
-6. SwiGLU: `silu(gate) * up`
-7. Concat attention output + MLP output
-8. Output projection
-9. Gated residual add
-
-# Z-Image Pipeline Overview
-
-```
-1. Text Encoding:    prompt -> Qwen3 hidden_states[-2] -> [seq, 2560]
-2. Latent Init:      random noise [16, H/8, W/8] then patch-space processing
-3. Denoising Loop:   noise_refiner(2) -> context_refiner(2) -> main layers(30)
-4. Final Layer:      norm + modulation + projection to patch channels
-5. Unpatchify:       [num_patches, 64] -> [16, H/8, W/8]
-6. VAE Decode:       latents -> image
-```
-
-Z-Image uses sequence order `[IMAGE_TOKENS | CAPTION_TOKENS]` in its transformer path.
-
-# Z-Image Architecture (S3-DiT)
-
-Overview:
-- Model: Z-Image-Turbo (6B)
-- Architecture: S3-DiT single-stream style with refiners
-- Steps: default 8 NFE (scheduler array has 9 sigma values)
-- guidance: 0.0 (no CFG)
-
-Transformer config (reference):
-- dim=3840
-- n_heads=30
-- n_kv_heads=30
-- head_dim=128
-- n_layers=30
-- n_refiner_layers=2 (noise + context)
-- in_channels=16
-- patch_size=2
-- cap_feat_dim=2560
-- axes_dims=[32,48,48]
-- rope_theta=256.0
-- ffn_hidden=10240
-
-# Z-Image Text Encoder
-
-Uses the same Qwen3 4B base encoder family, but extraction differs from Flux:
-- extract only `hidden_states[-2]` (layer 34/36)
-- output shape [seq, 2560]
-
-Chat template is the same as Flux Qwen3 template.
-
-# Z-Image VAE Notes
-
-Z-Image VAE is Flux-like architecture with different latent settings:
-- latent_channels=16 (Flux uses 32)
-- scaling_factor=0.3611
-- shift_factor=0.1159
-- patchification for transformer input uses 2x2 over 16ch -> 64-dim patch vector
-
-Decode uses:
-- `latents = (latents / scaling_factor) + shift_factor`, then decode.
-
-# Z-Image Block Structure
-
-With modulation (noise_refiner + main layers):
-- modulation vector split into: scale_msa, gate_msa, scale_mlp, gate_mlp
-- gates go through tanh
-- normalization is scaled (no additive shift in block modulation path)
-- attention and FFN residuals are gated
-
-Without modulation (context_refiner):
-- no adaLN modulation
-- standard residual attention + FFN structure
-
-# Z-Image RoPE
-
-3-axis RoPE, head_dim=128 split as:
-- Axis T: 32 dims
-- Axis H: 48 dims
-- Axis W: 48 dims
-
-Theta is 256.0.
-Caption and image position-id construction must match CPU/GPU path exactly.
-
-# Z-Image Scheduler
-
-Default scheduler follows official diffusers FlowMatch Euler behavior (static shift).
-Important points:
-- terminal sigma is appended as 0
-- implementation should match official sigma construction semantics
-- explicit `--linear` or `--power` options override default schedule for parity/testing
-
-# Z-Image Critical Implementation Details
-
-- Transformer sequence order is `[IMAGE | CAPTION]` in Z-Image path.
-- Step previews must decode correctly patchified latent representation (`patch_size=2`),
-  otherwise shown step resolution/content can be misleading.
-- Caption padding and position-id alignment must match between CPU and MPS paths.
-- Keep immutable/static and dynamic matrix paths separate in MPS GEMM caching.
-
-# Z-Image Runtime Lessons (Keep)
-
-- Keep transformer loaded across generations in interactive workflows; avoid load/free per image.
-- Precompute per-step modulation once and reuse across modulated blocks.
-- Keep GPU fallback policy inside the zImage GPU forward path; avoid immediate full CPU fallback.
-- Run zImage final layer on GPU path where possible; read back only what is needed for decode.
-- Run image/caption embedding projections on GPU path in MPS mode.
-- Warm bf16 weight caches at load time to reduce first-step jitter in steady-state usage.
-- Keep embedding-cache path wired for repeated prompts in distilled interactive mode.
-- Maintain zImage-specific denoising timing counters for targeted profiling.
-
-# Z-Image Known Pitfalls (Historical Bugs)
-
-1. **MPS SGEMM B-cache misuse caused VAE decode corruption (hue/border artifacts).**
-   - Root cause: generic SGEMM cached matrix B by pointer, but VAE attention K/V are dynamic temporaries.
-   - Fix: split API paths:
-     - `iris_metal_sgemm`: generic path, no B-pointer cache
-     - `iris_metal_sgemm_cached`: explicit static-weight cached path
-   - Static weight call sites (for example linear layers) use cached variant only.
-
-2. **Scheduler parity bug with official Python implementation.**
-   - Z-Image sigma schedule must follow official diffusers FlowMatch behavior.
-   - Incorrect sigma handling can waste steps and make show-steps output confusing.
-
-3. **Step-preview mismatch bug.**
-   - Z-Image preview decode must account for patch-size transformation, otherwise preview steps do not match final decode behavior.
-
-4. **CPU/GPU position-id mismatch under padded caption sequences.**
-   - Using non-padded cap length in one path and padded length in another changes RoPE indexing and output quality.
-
-5. **RMSNorm temporary weight caching pitfalls.**
-   - Temporary fused norm weights must not be pointer-cached as immutable weights.
-
-# Test Commands
-
-Basic verification:
-```bash
-make test
-```
-
-Manual Flux sanity:
-```bash
-./iris -d flux-klein-4b -p "A fluffy orange cat sitting on a windowsill" \
-  --seed 42 --steps 2 -o /tmp/iris_test.png -W 64 -H 64
-```
-
-Manual Z-Image sanity:
-```bash
-./iris -d zimage-turbo -p "a fish" --seed 43 --steps 8 -o /tmp/zimage_test.png
-```
-
-# Flux Known Pitfalls (Historical Bugs)
-
-1. **Unified RoPE kernel indexing**: GPU must use consecutive pairs `(d, d+1)`, not axis-half indexing.
-2. **GPU caching of timestep params**: step-dependent shift/scale/gate must not be cached as static weights.
-3. **CLI mode CFG routing**: base models in interactive mode must go through `iris_generate()` (CFG-aware), not distilled-only embedding path.
+The user works in Italian. Respond in Italian by default unless the
+user explicitly switches to English. Keep code identifiers, file
+paths, error messages in English.
