@@ -55,12 +55,18 @@ typedef struct {
      * uniformly in [-radius, +radius]^3. TripoSR default 0.87. */
     float radius;
 
-    /* If non-zero, bake a per-face texture atlas instead of writing vertex
-     * colors. Not implemented in v1; field reserved. */
+    /* If non-zero, bake a per-triangle UV atlas + PNG texture instead of
+     * emitting per-vertex colors. The resulting GLB references the texture
+     * via materials[0].pbrMetallicRoughness.baseColorTexture and carries
+     * TEXCOORD_0. */
     int   bake_texture;
+
+    /* Texture atlas resolution when bake_texture != 0. Default 2048.
+     * Memory: tex_res^2 * 4 bytes + small scratch. */
+    int   texture_resolution;
 } lrm_infer_opts;
 
-#define LRM_INFER_OPTS_DEFAULT { 256, 25.0f, 0.87f, 0 }
+#define LRM_INFER_OPTS_DEFAULT { 256, 25.0f, 0.87f, 0, 2048 }
 
 /* ========================================================================
  * Lifecycle

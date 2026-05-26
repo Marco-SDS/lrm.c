@@ -35,9 +35,11 @@ static void print_help(void) {
     printf("        Print the loaded tensor tree.\n");
     printf("\n");
     printf("  infer <model_dir> <image> -o <output.glb> [options]\n");
-    printf("        Run end-to-end TripoSR inference. Default options:\n");
-    printf("          --mc-resolution 256\n");
-    printf("          --threshold     25.0\n");
+    printf("        Run end-to-end TripoSR inference. Options:\n");
+    printf("          --mc-resolution       N    (default 256)\n");
+    printf("          --threshold           V    (default 25.0)\n");
+    printf("          --bake-texture             emit UV atlas + PNG texture\n");
+    printf("          --texture-resolution  N    (default 2048; only with --bake-texture)\n");
     printf("\n");
     printf("More subcommands (download, convert) arrive in Phase 17.\n");
 }
@@ -83,6 +85,8 @@ static int cmd_infer(int argc, char **argv) {
     const char *output     = NULL;
     int   mc_resolution = 256;
     float threshold     = 25.0f;
+    int   bake_texture  = 0;
+    int   texture_resolution = 2048;
     int   positional = 0;
 
     for (int i = 2; i < argc; i++) {
@@ -108,6 +112,16 @@ static int cmd_infer(int argc, char **argv) {
             if (threshold <= 0.0f) {
                 fprintf(stderr, "lrmc: --threshold must be > 0\n"); return 2;
             }
+        } else if (strcmp(a, "--bake-texture") == 0) {
+            bake_texture = 1;
+        } else if (strcmp(a, "--texture-resolution") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "lrmc: --texture-resolution requires a value\n"); return 2;
+            }
+            texture_resolution = parse_int(argv[++i]);
+            if (texture_resolution < 32) {
+                fprintf(stderr, "lrmc: --texture-resolution must be >= 32\n"); return 2;
+            }
         } else if (a[0] == '-') {
             fprintf(stderr, "lrmc: unknown option '%s'\n", a);
             return 2;
@@ -130,8 +144,12 @@ static int cmd_infer(int argc, char **argv) {
 
     fprintf(stderr, "lrmc: model=%s\n", model_dir);
     fprintf(stderr, "lrmc: image=%s\n", image_path);
-    fprintf(stderr, "lrmc: output=%s  mc_res=%d  threshold=%.2f\n",
-            output, mc_resolution, threshold);
+    fprintf(stderr, "lrmc: output=%s  mc_res=%d  threshold=%.2f%s\n",
+            output, mc_resolution, threshold,
+            bake_texture ? "  --bake-texture" : "");
+    if (bake_texture) {
+        fprintf(stderr, "lrmc: texture_resolution=%d\n", texture_resolution);
+    }
 
     double t0 = clock_ms();
 
@@ -154,8 +172,10 @@ static int cmd_infer(int argc, char **argv) {
     fprintf(stderr, "lrmc: model loaded in %.0f ms\n", t_load - t_img);
 
     lrm_infer_opts opts = LRM_INFER_OPTS_DEFAULT;
-    opts.mc_resolution    = mc_resolution;
+    opts.mc_resolution     = mc_resolution;
     opts.density_threshold = threshold;
+    opts.bake_texture      = bake_texture;
+    opts.texture_resolution = texture_resolution;
     lrm_mesh *mesh = lrm_infer(m, im, &opts);
     double t_infer = clock_ms();
     if (mesh == NULL) {

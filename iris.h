@@ -65,6 +65,15 @@ void iris_image_free(iris_image *img);
  */
 iris_image *iris_image_resize(const iris_image *img, int new_width, int new_height);
 
+/*
+ * Encode image as a PNG byte stream into a freshly allocated buffer.
+ * On success, *out_bytes is set to a malloc'd buffer and *out_size to
+ * its length; caller frees with free(). Returns 0 on success, -1 on
+ * failure. Used by the GLB writer to embed the texture atlas.
+ */
+int iris_image_encode_png(const iris_image *img,
+                          uint8_t **out_bytes, size_t *out_size);
+
 /* ========================================================================
  * Diagnostics
  * ======================================================================== */

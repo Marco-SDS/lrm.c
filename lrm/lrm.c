@@ -17,6 +17,7 @@
  */
 
 #include "lrm.h"
+#include "lrm_bake_texture.h"
 #include "lrm_mesh_export.h"
 #include "lrm_marching_cubes.h"
 #include "lrm_nerf_mlp.h"
@@ -358,7 +359,93 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
         return NULL;
     }
 
-    /* ----- 7. Vertex color re-query. */
+    /* ----- 7a. With --bake-texture: rasterize a UV atlas into a PNG. */
+    if (opts->bake_texture) {
+        int tex_res = (opts->texture_resolution > 0)
+                      ? opts->texture_resolution : 2048;
+        snprintf(stage_buf, sizeof(stage_buf),
+                 "bake texture (%dx%d, atlas rasterization + NeRF MLP)",
+                 tex_res, tex_res);
+        stage(stage_buf);
+
+        lrm_bake_cfg bcfg = LRM_BAKE_CFG_DEFAULT;
+        bcfg.texture_resolution = tex_res;
+
+        float   *atlas_uvs  = NULL;  /* [Nf*3, 2] */
+        uint8_t *tex_rgba   = NULL;  /* [tex_res*tex_res*4] */
+        if (lrm_bake_texture(&m->sample_cfg, &m->mlp, triplane,
+                             mc.vertices, mc.n_vertices,
+                             mc.faces, mc.n_faces, &bcfg,
+                             &atlas_uvs, &tex_rgba) != 0) {
+            lrm_mc_mesh_free(&mc);
+            free(triplane);
+            return NULL;
+        }
+
+        /* PNG-encode the texture in memory via iris_image_encode_png. */
+        iris_image img = {
+            .width = tex_res,
+            .height = tex_res,
+            .channels = 4,
+            .data = tex_rgba,
+        };
+        uint8_t *png_bytes = NULL;
+        size_t   png_size  = 0;
+        if (iris_image_encode_png(&img, &png_bytes, &png_size) != 0) {
+            free(atlas_uvs);
+            free(tex_rgba);
+            lrm_mc_mesh_free(&mc);
+            free(triplane);
+            iris_set_error("lrm_infer: PNG encode failed");
+            return NULL;
+        }
+        free(tex_rgba);
+        tex_rgba = NULL;
+        free(triplane);
+        triplane = NULL;
+
+        /* Duplicate vertices: each triangle gets its own 3 vertices so
+         * each can carry its per-triangle UV. New layout:
+         *   new_vertices[3*i + k] = mc.vertices[mc.faces[i, k]]
+         *   new_faces[i] = (3*i, 3*i+1, 3*i+2)
+         * vertex count = 3 * Nf. */
+        const int Nf_saved = mc.n_faces;  /* snapshot before free */
+        const int Nv_new   = 3 * Nf_saved;
+        float   *new_verts = (float *)malloc((size_t)Nv_new * 3 * sizeof(float));
+        int32_t *new_faces = (int32_t *)malloc((size_t)Nf_saved * 3 * sizeof(int32_t));
+        if (!new_verts || !new_faces) {
+            free(new_verts); free(new_faces);
+            free(atlas_uvs); free(png_bytes);
+            lrm_mc_mesh_free(&mc);
+            iris_set_error("lrm_infer: oom for vertex duplication");
+            return NULL;
+        }
+        for (int i = 0; i < Nf_saved; i++) {
+            for (int k = 0; k < 3; k++) {
+                int src = mc.faces[i * 3 + k];
+                int dst = i * 3 + k;
+                new_verts[dst * 3 + 0] = mc.vertices[src * 3 + 0];
+                new_verts[dst * 3 + 1] = mc.vertices[src * 3 + 1];
+                new_verts[dst * 3 + 2] = mc.vertices[src * 3 + 2];
+                new_faces[i * 3 + k]   = dst;
+            }
+        }
+        lrm_mc_mesh_free(&mc);  /* original indexed buffers no longer needed */
+
+        lrm_mesh *mesh = lrm_mesh_from_buffers(Nv_new, new_verts,
+                                               Nf_saved, new_faces,
+                                               /*vertex_colors=*/NULL);
+        if (!mesh) {
+            free(new_verts); free(new_faces);
+            free(atlas_uvs); free(png_bytes);
+            return NULL;
+        }
+        lrm_mesh_set_texture(mesh, atlas_uvs, png_bytes, png_size);
+        stage_done();
+        return mesh;
+    }
+
+    /* ----- 7b. Default path: vertex color re-query. */
     snprintf(stage_buf, sizeof(stage_buf),
              "vertex color re-query (%d vertices)", mc.n_vertices);
     stage(stage_buf);

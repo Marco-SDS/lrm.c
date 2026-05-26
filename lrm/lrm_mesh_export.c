@@ -52,7 +52,19 @@ void lrm_mesh_free(lrm_mesh *m) {
     free(m->vertices);
     free(m->faces);
     free(m->vertex_colors);
+    free(m->uvs);
+    free(m->texture_png);
     free(m);
+}
+
+void lrm_mesh_set_texture(lrm_mesh *m, float *uvs,
+                          uint8_t *texture_png, size_t texture_png_size) {
+    if (!m) return;
+    free(m->uvs);
+    free(m->texture_png);
+    m->uvs              = uvs;
+    m->texture_png      = texture_png;
+    m->texture_png_size = texture_png_size;
 }
 
 /* ========================================================================
@@ -203,10 +215,12 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
     const int  Nv  = mesh->n_vertices;
     const int  Nf  = mesh->n_faces;
     const int  Ni  = Nf * 3;
-    const int  has_color = (mesh->vertex_colors != NULL);
+    const int  has_color   = (mesh->vertex_colors != NULL);
+    const int  has_texture = (mesh->uvs != NULL && mesh->texture_png != NULL);
 
     /* Pick index componentType. Most LRM meshes at 64^3 have a few
-     * thousand verts so u16 suffices; at 256^3 we may need u32. */
+     * thousand verts so u16 suffices; at 256^3 we may need u32. With
+     * --bake-texture vertex count = 3*Nf which can overflow u16 quickly. */
     const int  use_u32 = (Nv > 65535);
     const int  idx_comp = use_u32 ? GLTF_COMP_U32 : GLTF_COMP_U16;
     const size_t idx_elem = use_u32 ? 4 : 2;
@@ -272,6 +286,15 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
         if (bb_write(&bin, colors_u8, col_len) != 0) goto oom;
     }
 
+    /* TEXCOORD_0 (f32 VEC2) */
+    size_t tex_off = 0, tex_len = 0;
+    if (has_texture) {
+        if (bb_pad_to_4(&bin, 0) != 0) goto oom;
+        tex_off = bin.len;
+        tex_len = (size_t)Nv * 2 * sizeof(float);
+        if (bb_write(&bin, mesh->uvs, tex_len) != 0) goto oom;
+    }
+
     /* indices */
     if (bb_pad_to_4(&bin, 0) != 0) goto oom;
     const size_t idx_off = bin.len;
@@ -295,6 +318,16 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
         free(tmp);
         if (rc != 0) goto oom;
     }
+    /* PNG texture bytes (if any). Stored after indices; image bufferView
+     * has no `target` (per spec, only accessor-backed bufferViews do). */
+    size_t img_off = 0, img_len = 0;
+    if (has_texture) {
+        if (bb_pad_to_4(&bin, 0) != 0) goto oom;
+        img_off = bin.len;
+        img_len = mesh->texture_png_size;
+        if (bb_write(&bin, mesh->texture_png, img_len) != 0) goto oom;
+    }
+
     /* glTF spec requires both chunks be 4-byte aligned in the file. */
     if (bb_pad_to_4(&bin, 0) != 0) goto oom;
 
@@ -302,70 +335,111 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
     free(normals);   normals   = NULL;
     free(colors_u8); colors_u8 = NULL;
 
-    /* ----- Build the JSON chunk. Accessor indices:
-     *   0  POSITION
-     *   1  NORMAL
+    /* ----- Build the JSON chunk. Accessor indices (running counter):
+     *   0  POSITION   (always)
+     *   1  NORMAL     (always)
      *   2  COLOR_0    (only if has_color)
-     *   N  indices    (last; N = 2 with color, 1 without)
+     *   .  TEXCOORD_0 (only if has_texture)
+     *   N  indices    (last)
+     *
+     * BufferView indices follow the same order, plus one EXTRA entry
+     * at the end for the image PNG bytes (only if has_texture).
      */
-    /* Accessor indices used in the JSON below. */
-    const int  acc_pos  = 0;
-    const int  acc_nor  = 1;
-    /* acc_col = 2 when has_color (referenced inline in the JSON). */
-    const int  acc_idx  = has_color ? 3 : 2;
+    int next_acc = 2;
+    const int acc_pos = 0;
+    const int acc_nor = 1;
+    const int acc_col = has_color   ? next_acc++ : -1;
+    const int acc_tex = has_texture ? next_acc++ : -1;
+    const int acc_idx = next_acc;
+
+    int next_bv = 2;
+    const int bv_pos = 0;
+    const int bv_nor = 1;
+    const int bv_col = has_color   ? next_bv++ : -1;
+    const int bv_tex = has_texture ? next_bv++ : -1;
+    const int bv_idx = next_bv++;
+    const int bv_img = has_texture ? next_bv : -1;
 
     bytebuf js = {0};
+
+    /* Asset + top-level scene/nodes. */
     if (bb_printf(&js,
         "{\"asset\":{\"version\":\"2.0\",\"generator\":\"lrm.c\"},"
         "\"scene\":0,"
         "\"scenes\":[{\"nodes\":[0]}],"
-        "\"nodes\":[{\"mesh\":0}],"
+        "\"nodes\":[{\"mesh\":0}],") != 0) goto oom_js;
+
+    /* Material: PBR matte. With a texture present we ALSO set
+     * baseColorTexture; viewers multiply the texture into the
+     * baseColorFactor (and any COLOR_0) per spec. */
+    if (bb_printf(&js,
         "\"materials\":[{"
-        /* PBR matte material; vertex COLOR_0 is multiplied into the
-         * baseColorFactor by viewers per the glTF 2.0 spec. */
         "\"name\":\"lrm_default\","
         "\"pbrMetallicRoughness\":{"
         "\"baseColorFactor\":[1,1,1,1],"
         "\"metallicFactor\":0,"
-        "\"roughnessFactor\":1"
-        "},"
-        "\"doubleSided\":true"
-        "}],"
+        "\"roughnessFactor\":1") != 0) goto oom_js;
+    if (has_texture) {
+        if (bb_printf(&js,
+            ",\"baseColorTexture\":{\"index\":0,\"texCoord\":0}") != 0) goto oom_js;
+    }
+    if (bb_printf(&js,
+        "},\"doubleSided\":true}],") != 0) goto oom_js;
+
+    /* Textures + samplers + images (only if has_texture). */
+    if (has_texture) {
+        if (bb_printf(&js,
+            "\"textures\":[{\"sampler\":0,\"source\":0}],"
+            "\"samplers\":[{\"magFilter\":9729,\"minFilter\":9987,"
+            "\"wrapS\":33071,\"wrapT\":33071}],"
+            /* 9729=LINEAR, 9987=LINEAR_MIPMAP_LINEAR, 33071=CLAMP_TO_EDGE */
+            "\"images\":[{\"bufferView\":%d,\"mimeType\":\"image/png\"}],",
+            bv_img) != 0) goto oom_js;
+    }
+
+    /* Mesh + primitive. Build the attributes map dynamically. */
+    if (bb_printf(&js,
         "\"meshes\":[{\"primitives\":[{"
-        "\"attributes\":{\"POSITION\":%d,\"NORMAL\":%d%s},"
-        "\"indices\":%d,"
-        "\"material\":0,"
-        "\"mode\":%d"
-        "}]}],"
-        "\"accessors\":[",
-        acc_pos, acc_nor,
-        has_color ? ",\"COLOR_0\":2" : "",
-        acc_idx,
-        GLTF_MODE_TRIANGLES) != 0) goto oom_js;
+        "\"attributes\":{\"POSITION\":%d,\"NORMAL\":%d",
+        acc_pos, acc_nor) != 0) goto oom_js;
+    if (has_color)   { if (bb_printf(&js, ",\"COLOR_0\":%d", acc_col) != 0) goto oom_js; }
+    if (has_texture) { if (bb_printf(&js, ",\"TEXCOORD_0\":%d", acc_tex) != 0) goto oom_js; }
+    if (bb_printf(&js,
+        "},\"indices\":%d,\"material\":0,\"mode\":%d}]}],",
+        acc_idx, GLTF_MODE_TRIANGLES) != 0) goto oom_js;
+
+    /* Accessors. */
+    if (bb_printf(&js, "\"accessors\":[") != 0) goto oom_js;
 
     /* Accessor 0: POSITION. */
     if (bb_printf(&js,
-        "{\"bufferView\":0,\"componentType\":%d,\"count\":%d,\"type\":\"VEC3\","
+        "{\"bufferView\":%d,\"componentType\":%d,\"count\":%d,\"type\":\"VEC3\","
         "\"min\":[%.8g,%.8g,%.8g],\"max\":[%.8g,%.8g,%.8g]}",
-        GLTF_COMP_F32, Nv,
+        bv_pos, GLTF_COMP_F32, Nv,
         (double)mn[0], (double)mn[1], (double)mn[2],
         (double)mx[0], (double)mx[1], (double)mx[2]) != 0) goto oom_js;
     /* Accessor 1: NORMAL. */
     if (bb_printf(&js,
-        ",{\"bufferView\":1,\"componentType\":%d,\"count\":%d,\"type\":\"VEC3\"}",
-        GLTF_COMP_F32, Nv) != 0) goto oom_js;
+        ",{\"bufferView\":%d,\"componentType\":%d,\"count\":%d,\"type\":\"VEC3\"}",
+        bv_nor, GLTF_COMP_F32, Nv) != 0) goto oom_js;
     /* Accessor 2: COLOR_0 (u8 normalized) - only if present. */
     if (has_color) {
         if (bb_printf(&js,
-            ",{\"bufferView\":2,\"componentType\":%d,"
+            ",{\"bufferView\":%d,\"componentType\":%d,"
             "\"normalized\":true,\"count\":%d,\"type\":\"VEC4\"}",
-            GLTF_COMP_U8, Nv) != 0) goto oom_js;
+            bv_col, GLTF_COMP_U8, Nv) != 0) goto oom_js;
+    }
+    /* Accessor for TEXCOORD_0 (f32 VEC2). */
+    if (has_texture) {
+        if (bb_printf(&js,
+            ",{\"bufferView\":%d,\"componentType\":%d,\"count\":%d,\"type\":\"VEC2\"}",
+            bv_tex, GLTF_COMP_F32, Nv) != 0) goto oom_js;
     }
     /* Last accessor: indices. */
     if (bb_printf(&js,
         ",{\"bufferView\":%d,\"componentType\":%d,\"count\":%d,\"type\":\"SCALAR\"}"
         "],",
-        has_color ? 3 : 2, idx_comp, Ni) != 0) goto oom_js;
+        bv_idx, idx_comp, Ni) != 0) goto oom_js;
 
     /* bufferViews. */
     if (bb_printf(&js, "\"bufferViews\":[") != 0) goto oom_js;
@@ -380,10 +454,21 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
             ",{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu,\"target\":%d}",
             col_off, col_len, GLTF_TARGET_ARRAY) != 0) goto oom_js;
     }
+    if (has_texture) {
+        if (bb_printf(&js,
+            ",{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu,\"target\":%d}",
+            tex_off, tex_len, GLTF_TARGET_ARRAY) != 0) goto oom_js;
+    }
     if (bb_printf(&js,
-        ",{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu,\"target\":%d}"
-        "],",
+        ",{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu,\"target\":%d}",
         idx_off, idx_len, GLTF_TARGET_INDEX) != 0) goto oom_js;
+    /* Image bufferView has no `target` per spec. */
+    if (has_texture) {
+        if (bb_printf(&js,
+            ",{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu}",
+            img_off, img_len) != 0) goto oom_js;
+    }
+    if (bb_printf(&js, "],") != 0) goto oom_js;
 
     /* The single buffer. */
     if (bb_printf(&js, "\"buffers\":[{\"byteLength\":%zu}]}", bin.len) != 0) goto oom_js;

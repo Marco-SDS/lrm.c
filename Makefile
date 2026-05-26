@@ -25,7 +25,7 @@ UNAME_M := $(shell uname -m)
 # binary is lrmc, library is liblrmc.a).
 
 INFRA_SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
-LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c lrm/lrm_triplane_upsample.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c lrm/lrm_marching_cubes.c lrm/lrm_mesh_export.c
+LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c lrm/lrm_triplane_upsample.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c lrm/lrm_marching_cubes.c lrm/lrm_mesh_export.c lrm/lrm_bake_texture.c
 SRCS       = $(INFRA_SRCS) $(LRM_SRCS)
 OBJS       = $(SRCS:.c=.o)
 MAIN       = main.c
@@ -34,7 +34,7 @@ LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info pngtest test test-dino test-decoder test-upsample test-density test-mc test-glb test-e2e help generic blas mps
+.PHONY: all clean debug lib install info pngtest test test-dino test-decoder test-upsample test-density test-mc test-glb test-e2e test-e2e-tex help generic blas mps
 .NOTPARALLEL: mps
 
 # Default: show available targets
@@ -62,6 +62,7 @@ endif
 	@echo "  make test-mc       - Build and run the marching cubes parity test"
 	@echo "  make test-glb      - Build and run the GLB writer structural test"
 	@echo "  make test-e2e      - End-to-end TripoSR inference at 64^3 (~50 s on Intel macOS CPU)"
+	@echo "  make test-e2e-tex  - Textured end-to-end at 64^3 with 1024^2 UV atlas"
 	@echo "  make pngtest       - Run the PNG codec comparison test"
 	@echo "  make info     - Show build configuration"
 	@echo "  make lib      - Build static library ($(LIB))"
@@ -228,6 +229,20 @@ test-e2e: blas
 	@echo ""
 	@echo "PASS  end-to-end inference (/tmp/lrm_e2e.glb)"
 
+test-e2e-tex: blas
+	@echo ""
+	@echo "Running textured end-to-end at 64^3 + 1024^2 atlas ..."
+	@./lrmc infer triposr_env triposr_env/examples/robot.png \
+	    -o /tmp/lrm_e2e_tex.glb --mc-resolution 64 \
+	    --bake-texture --texture-resolution 1024
+	@if [ -x triposr_env/.venv/bin/python ]; then \
+	    echo ""; \
+	    echo "Verifying GLB via check_glb.py:"; \
+	    triposr_env/.venv/bin/python tools/check_glb.py /tmp/lrm_e2e_tex.glb; \
+	fi
+	@echo ""
+	@echo "PASS  end-to-end textured inference (/tmp/lrm_e2e_tex.glb)"
+
 pngtest:
 	@echo "Running PNG compression compare test..."
 	@$(CC) $(CFLAGS_BASE) -I. png_compare.c iris_image.c iris.c -lm -o /tmp/lrm_png_compare
@@ -280,4 +295,5 @@ lrm/lrm_triplane_sample.o: lrm/lrm_triplane_sample.c lrm/lrm_triplane_sample.h i
 lrm/lrm_nerf_mlp.o: lrm/lrm_nerf_mlp.c lrm/lrm_nerf_mlp.h iris.h iris_kernels.h iris_safetensors.h
 lrm/lrm_marching_cubes.o: lrm/lrm_marching_cubes.c lrm/lrm_marching_cubes.h iris.h
 lrm/lrm_mesh_export.o: lrm/lrm_mesh_export.c lrm/lrm_mesh_export.h lrm/lrm.h iris.h
+lrm/lrm_bake_texture.o: lrm/lrm_bake_texture.c lrm/lrm_bake_texture.h lrm/lrm_triplane_sample.h lrm/lrm_nerf_mlp.h iris.h iris_kernels.h
 main.o: main.c iris.h lrm/lrm.h lrm/lrm_triposr.h

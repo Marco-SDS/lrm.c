@@ -899,6 +899,27 @@ iris_image *iris_image_load(const char *path) {
     return img;
 }
 
+/* Encode the image to a malloc'd PNG byte buffer via the existing
+ * file-based encoder + open_memstream (POSIX). Used by the GLB writer
+ * to embed the texture atlas without an intermediate file. */
+int iris_image_encode_png(const iris_image *img,
+                          uint8_t **out_bytes, size_t *out_size) {
+    if (!img || !out_bytes || !out_size) return -1;
+    char *buf = NULL;
+    size_t buf_size = 0;
+    FILE *f = open_memstream(&buf, &buf_size);
+    if (!f) return -1;
+    int rc = save_png(img, f);
+    fclose(f);                /* flushes into buf */
+    if (rc != 0) {
+        free(buf);
+        return -1;
+    }
+    *out_bytes = (uint8_t *)buf;
+    *out_size  = buf_size;
+    return 0;
+}
+
 int iris_image_save(const iris_image *img, const char *path) {
     if (!img || !path) return -1;
 
