@@ -1,10 +1,18 @@
-# lrm.c - Pure-C inference engine for LRM-family image-to-3D models.
+# lrm.c - Pure-C inference engine for LRM-family image-to-3D models (TripoSR).
 # Fork of antirez/iris.c; see LRMengine.md for the full plan.
 #
-# Three peer backends, picked at build time:
-#   make generic - Pure C, no deps (slow, for portability)
-#   make blas    - OpenBLAS (Linux) / Accelerate (macOS), ~30x faster
-#   make mps     - Apple Silicon Metal GPU (fastest, macOS arm64 only)
+# Two CPU build pipelines produce the `lrmc` binary:
+#   make generic   - Pure C, no deps (slow, fully portable)
+#   make blas      - Accelerate (macOS) / OpenBLAS (Linux). Default, ~30x faster
+#
+# A Metal/GPU backend is planned (Phase 13) but the kernels are not yet
+# implemented, so no GPU target is exposed here. The iris_metal*/iris_shaders
+# sources are kept in the tree for that future work.
+#
+# Run end-to-end inference with the built binary (see `make run`):
+#   make run IMAGE=img.png RES=256 TEX=0 OUT=/tmp/out.glb
+#
+# Validate numerics against the PyTorch reference with `make check`.
 
 CC = gcc
 # -I. lets sources under lrm/ include root headers (iris.h, iris_kernels.h).
@@ -15,199 +23,178 @@ LDFLAGS = -lm
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
+# BLAS flags, factored so both the `blas` build and the parity tests share
+# them (Accelerate on macOS, OpenBLAS on Linux).
+ifeq ($(UNAME_S),Darwin)
+BLAS_CFLAGS  = -DUSE_BLAS -DACCELERATE_NEW_LAPACK
+BLAS_LDFLAGS = -framework Accelerate
+else
+BLAS_CFLAGS  = -DUSE_BLAS -DUSE_OPENBLAS -I/usr/include/openblas
+BLAS_LDFLAGS = -lopenblas
+endif
+
 # =============================================================================
 # Source files
 # =============================================================================
 # Root sources = generic infrastructure (kernels, image I/O, safetensors).
-# lrm/ subdirectory = LRM-specific code (skeleton in Phase 3; populated in
-# Phases 5-11). The binary is named ./lrmc to avoid the filesystem conflict
-# between a regular file ./lrm and a directory ./lrm/ (project name is lrm.c,
-# binary is lrmc, library is liblrmc.a).
-
+# lrm/ = ALL LRM-specific code. Binary is `lrmc` (avoids the ./lrm file vs
+# lrm/ directory clash); static library is liblrmc.a.
 INFRA_SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
 LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c lrm/lrm_triplane_upsample.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c lrm/lrm_density.c lrm/lrm_marching_cubes.c lrm/lrm_mesh_export.c lrm/lrm_bake_texture.c
 SRCS       = $(INFRA_SRCS) $(LRM_SRCS)
 OBJS       = $(SRCS:.c=.o)
-MAIN       = main.c
 TARGET     = lrmc
 LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info test test-dino test-decoder test-upsample test-density test-density-sparse test-mc test-glb test-e2e test-e2e-tex help generic blas mps
-.NOTPARALLEL: mps
+# Parameters for `make run` (override on the command line).
+MODEL  ?= triposr_env
+IMAGE  ?= triposr_env/examples/robot.png
+OUT    ?= /tmp/lrm_out.glb
+RES    ?= 256
+TEX    ?= 0
+TEXRES ?= 2048
+TEX_FLAGS = $(if $(filter 1 yes on true,$(TEX)),--bake-texture --texture-resolution $(TEXRES),)
+
+.PHONY: all help generic blas run check debug lib install info clean \
+        test test-dino test-decoder test-upsample test-density \
+        test-density-sparse test-mc test-glb
 
 # Default: show available targets
 all: help
 
 help:
-	@echo "lrm.c - Build Targets"
+	@echo "lrm.c - image -> 3D (TripoSR), pure C, CPU"
 	@echo ""
-	@echo "Choose a backend:"
-	@echo "  make generic  - Pure C, no dependencies (slow, portable)"
-	@echo "  make blas     - With BLAS acceleration"
-ifeq ($(UNAME_S),Darwin)
-ifeq ($(UNAME_M),arm64)
-	@echo "  make mps      - Apple Silicon with Metal GPU (fastest)"
-endif
-endif
+	@echo "Build (produces ./$(TARGET)):"
+	@echo "  make blas     - CPU + BLAS (Accelerate/OpenBLAS). Default, fast."
+	@echo "  make generic  - CPU, pure C, no deps. Portable, ~30x slower."
 	@echo ""
-	@echo "Other targets:"
-	@echo "  make clean    - Remove build artifacts"
-	@echo "  make test          - Build and run the kernel parity tests"
-	@echo "  make test-dino     - Build and run the DINO ViT-B/16 parity test"
-	@echo "  make test-decoder  - Build and run the triplane decoder parity test"
-	@echo "  make test-upsample - Build and run the post-processor parity test"
-	@echo "  make test-density  - Build and run the triplane-sample + NeRF MLP test"
-	@echo "  make test-mc       - Build and run the marching cubes parity test"
-	@echo "  make test-glb      - Build and run the GLB writer structural test"
-	@echo "  make test-e2e      - End-to-end TripoSR inference at 64^3 (~50 s on Intel macOS CPU)"
-	@echo "  make test-e2e-tex  - Textured end-to-end at 64^3 with 1024^2 UV atlas"
-	@echo "  make info     - Show build configuration"
-	@echo "  make lib      - Build static library ($(LIB))"
+	@echo "Run end-to-end inference with the built binary:"
+	@echo "  make run [IMAGE=..] [RES=N] [TEX=0|1] [TEXRES=N] [OUT=..] [MODEL=..]"
+	@echo "    IMAGE  input image           (default: $(IMAGE))"
+	@echo "    RES    marching-cubes res     (default: $(RES); try 64/128/256/512)"
+	@echo "    TEX    bake UV texture        (1 = textured, 0 = vertex colors; default 0)"
+	@echo "    TEXRES texture atlas size     (default: $(TEXRES); only with TEX=1)"
+	@echo "    OUT    output .glb path       (default: $(OUT))"
+	@echo "    MODEL  model directory        (default: $(MODEL))"
 	@echo ""
-	@echo "Phase 3 stub: ./$(TARGET) links lrm/ but the API is still empty;"
-	@echo "real implementations land in Phases 5-11. See LRMengine.md."
+	@echo "Validate / develop:"
+	@echo "  make check    - run all parity tests vs the PyTorch reference"
+	@echo "  make clean    - remove build artifacts"
+	@echo "  make lib      - build static library ($(LIB))"
+	@echo "  make info     - show build configuration"
+	@echo ""
+	@echo "A Metal/GPU backend is planned (Phase 13); not yet available."
 
 # =============================================================================
-# Backend: generic (pure C, no BLAS)
+# Build pipelines (CPU)
 # =============================================================================
 generic: CFLAGS = $(CFLAGS_BASE) -DGENERIC_BUILD
 generic: clean $(TARGET)
 	@echo ""
-	@echo "Built with GENERIC backend (pure C, no BLAS)."
+	@echo "Built ./$(TARGET) with GENERIC backend (pure C, no BLAS)."
 
-# =============================================================================
-# Backend: blas (Accelerate on macOS, OpenBLAS on Linux)
-# =============================================================================
-ifeq ($(UNAME_S),Darwin)
-blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK
-blas: LDFLAGS += -framework Accelerate
-else
-blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_OPENBLAS -I/usr/include/openblas
-blas: LDFLAGS += -lopenblas
-endif
+blas: CFLAGS = $(CFLAGS_BASE) $(BLAS_CFLAGS)
+blas: LDFLAGS += $(BLAS_LDFLAGS)
 blas: clean $(TARGET)
 	@echo ""
-	@echo "Built with BLAS backend."
+	@echo "Built ./$(TARGET) with BLAS backend."
 
-# =============================================================================
-# Backend: mps (Apple Silicon Metal GPU)
-# =============================================================================
-ifeq ($(UNAME_S),Darwin)
-ifeq ($(UNAME_M),arm64)
-MPS_CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_METAL -DACCELERATE_NEW_LAPACK
-MPS_OBJCFLAGS = $(MPS_CFLAGS) -fobjc-arc
-MPS_LDFLAGS = $(LDFLAGS) -framework Accelerate -framework Metal -framework MetalPerformanceShaders -framework MetalPerformanceShadersGraph -framework Foundation
-
-mps: clean mps-build
-	@echo ""
-	@echo "Built with MPS backend (Metal GPU)."
-
-mps-build: $(SRCS:.c=.mps.o) iris_metal.o main.mps.o
-	$(CC) $(MPS_CFLAGS) -o $(TARGET) $^ $(MPS_LDFLAGS)
-
-%.mps.o: %.c iris.h iris_kernels.h
-	$(CC) $(MPS_CFLAGS) -c -o $@ $<
-
-# Embed Metal shader source as a C array (runtime compilation, no Metal
-# toolchain needed at user-build time).
-iris_shaders_source.h: iris_shaders.metal
-	xxd -i $< > $@
-
-iris_metal.o: iris_metal.m iris_metal.h iris_shaders_source.h
-	$(CC) $(MPS_OBJCFLAGS) -c -o $@ $<
-
-else
-mps:
-	@echo "Error: MPS backend requires Apple Silicon (arm64)."
-	@exit 1
-endif
-else
-mps:
-	@echo "Error: MPS backend requires macOS."
-	@exit 1
-endif
-
-# =============================================================================
-# Build rules
-# =============================================================================
 $(TARGET): $(OBJS) main.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-lib: $(LIB)
-
-$(LIB): $(OBJS)
-	ar rcs $@ $^
 
 %.o: %.c iris.h iris_kernels.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# Debug build
+lib: $(LIB)
+$(LIB): $(OBJS)
+	ar rcs $@ $^
+
 debug: CFLAGS = $(DEBUG_CFLAGS)
 debug: LDFLAGS += -fsanitize=address
 debug: clean $(TARGET)
 
 # =============================================================================
-# Utilities
+# Run end-to-end inference with the built binary
 # =============================================================================
+run:
+	@test -x ./$(TARGET) || $(MAKE) blas
+	@echo "lrmc infer: model=$(MODEL) image=$(IMAGE) res=$(RES) tex=$(TEX) out=$(OUT)"
+	./$(TARGET) infer $(MODEL) $(IMAGE) -o $(OUT) --mc-resolution $(RES) $(TEX_FLAGS)
+	@if [ -x triposr_env/.venv/bin/python ]; then \
+	    echo ""; echo "Inspecting $(OUT):"; \
+	    triposr_env/.venv/bin/python debug/debug_mesh.py $(OUT); \
+	fi
+
+# =============================================================================
+# Parity tests (numerical correctness vs the PyTorch reference)
+# =============================================================================
+# `make check` runs the whole suite; individual targets are available for
+# debugging a single stage.
+check: test test-dino test-decoder test-upsample test-density \
+       test-density-sparse test-mc test-glb
+	@echo ""
+	@echo "PASS  all parity tests"
+
 test:
-	@echo "Building kernel parity tests..."
+	@echo "[kernels] LayerNorm/GELU/GEGLU/grid_sample vs NumPy ..."
 	@$(CC) $(CFLAGS_BASE) tests/model/test_kernels.c iris_kernels.c \
 	    -lm -o /tmp/lrm_test_kernels
 	@/tmp/lrm_test_kernels
 	@rm -f /tmp/lrm_test_kernels
 
 test-dino:
-	@echo "Building DINO ViT-B/16 parity test..."
-	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
+	@echo "[dino] DINO ViT-B/16 forward parity ..."
+	@$(CC) $(CFLAGS_BASE) $(BLAS_CFLAGS) \
 	    tests/model/test_vit_dino.c lrm/lrm_vit_dino.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
-	    -framework Accelerate -lm -o /tmp/lrm_test_dino
+	    $(BLAS_LDFLAGS) -lm -o /tmp/lrm_test_dino
 	@/tmp/lrm_test_dino
 	@rm -f /tmp/lrm_test_dino
 
 test-decoder:
-	@echo "Building triplane decoder parity test..."
-	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
+	@echo "[decoder] triplane decoder forward parity ..."
+	@$(CC) $(CFLAGS_BASE) $(BLAS_CFLAGS) \
 	    tests/model/test_triplane_decoder.c lrm/lrm_triplane_decoder.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
-	    -framework Accelerate -lm -o /tmp/lrm_test_decoder
+	    $(BLAS_LDFLAGS) -lm -o /tmp/lrm_test_decoder
 	@/tmp/lrm_test_decoder
 	@rm -f /tmp/lrm_test_decoder
 
 test-upsample:
-	@echo "Building triplane upsample parity test..."
-	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
+	@echo "[upsample] post-processor parity ..."
+	@$(CC) $(CFLAGS_BASE) $(BLAS_CFLAGS) \
 	    tests/model/test_triplane_upsample.c lrm/lrm_triplane_upsample.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
-	    -framework Accelerate -lm -o /tmp/lrm_test_upsample
+	    $(BLAS_LDFLAGS) -lm -o /tmp/lrm_test_upsample
 	@/tmp/lrm_test_upsample
 	@rm -f /tmp/lrm_test_upsample
 
 test-density:
-	@echo "Building triplane-sample + NeRF MLP parity test..."
-	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
+	@echo "[density] triplane-sample + NeRF MLP parity ..."
+	@$(CC) $(CFLAGS_BASE) $(BLAS_CFLAGS) \
 	    tests/model/test_density_64.c \
 	    lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
-	    -framework Accelerate -lm -o /tmp/lrm_test_density
+	    $(BLAS_LDFLAGS) -lm -o /tmp/lrm_test_density
 	@/tmp/lrm_test_density
 	@rm -f /tmp/lrm_test_density
 
 test-density-sparse:
-	@echo "Building sparse-vs-dense density parity test..."
-	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
+	@echo "[geometry] sparse-vs-dense density MC parity ..."
+	@$(CC) $(CFLAGS_BASE) $(BLAS_CFLAGS) \
 	    tests/geometry/test_density_sparse.c \
 	    lrm/lrm_density.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c \
 	    lrm/lrm_marching_cubes.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
-	    -framework Accelerate -lm -o /tmp/lrm_test_density_sparse
+	    $(BLAS_LDFLAGS) -lm -o /tmp/lrm_test_density_sparse
 	@/tmp/lrm_test_density_sparse
 	@rm -f /tmp/lrm_test_density_sparse
 
 test-mc:
-	@echo "Building marching cubes parity test..."
+	@echo "[geometry] marching cubes structural parity + floater removal ..."
 	@$(CC) $(CFLAGS_BASE) \
 	    tests/geometry/test_marching_cubes.c lrm/lrm_marching_cubes.c iris.c \
 	    -lm -o /tmp/lrm_test_mc
@@ -215,7 +202,7 @@ test-mc:
 	@rm -f /tmp/lrm_test_mc
 
 test-glb:
-	@echo "Building GLB writer test..."
+	@echo "[geometry] GLB writer structure ..."
 	@$(CC) $(CFLAGS_BASE) -D_DARWIN_C_SOURCE -D_GNU_SOURCE \
 	    tests/geometry/test_glb.c lrm/lrm_mesh_export.c iris.c \
 	    -lm -o /tmp/lrm_test_glb
@@ -226,60 +213,23 @@ test-glb:
 	fi
 	@rm -f /tmp/lrm_test_glb /tmp/lrm_test.glb
 
-test-e2e: blas
-	@echo ""
-	@echo "Running end-to-end TripoSR inference at 64^3 ..."
-	@./lrmc infer triposr_env triposr_env/examples/robot.png \
-	    -o /tmp/lrm_e2e.glb --mc-resolution 64
-	@if [ -x triposr_env/.venv/bin/python ]; then \
-	    echo ""; \
-	    echo "Verifying GLB via check_glb.py:"; \
-	    triposr_env/.venv/bin/python tools/check_glb.py /tmp/lrm_e2e.glb; \
-	fi
-	@echo ""
-	@echo "PASS  end-to-end inference (/tmp/lrm_e2e.glb)"
-
-test-e2e-tex: blas
-	@echo ""
-	@echo "Running textured end-to-end at 64^3 + 1024^2 atlas ..."
-	@./lrmc infer triposr_env triposr_env/examples/robot.png \
-	    -o /tmp/lrm_e2e_tex.glb --mc-resolution 64 \
-	    --bake-texture --texture-resolution 1024
-	@if [ -x triposr_env/.venv/bin/python ]; then \
-	    echo ""; \
-	    echo "Verifying GLB via check_glb.py:"; \
-	    triposr_env/.venv/bin/python tools/check_glb.py /tmp/lrm_e2e_tex.glb; \
-	fi
-	@echo ""
-	@echo "PASS  end-to-end textured inference (/tmp/lrm_e2e_tex.glb)"
-
+# =============================================================================
+# Utilities
+# =============================================================================
 install: $(TARGET) $(LIB)
-	install -d /usr/local/bin
-	install -d /usr/local/lib
-	install -d /usr/local/include
+	install -d /usr/local/bin /usr/local/lib /usr/local/include
 	install -m 755 $(TARGET) /usr/local/bin/
 	install -m 644 $(LIB) /usr/local/lib/
-	install -m 644 iris.h /usr/local/include/
-	install -m 644 iris_kernels.h /usr/local/include/
+	install -m 644 iris.h iris_kernels.h /usr/local/include/
 
 clean:
-	rm -f $(OBJS) $(SRCS:.c=.mps.o) iris_metal.o main.o main.mps.o $(TARGET) $(LIB)
-	rm -f iris_shaders_source.h
+	rm -f $(OBJS) main.o $(TARGET) $(LIB)
 
 info:
 	@echo "Platform: $(UNAME_S) $(UNAME_M)"
 	@echo "Compiler: $(CC)"
-	@echo ""
-	@echo "Available backends for this platform:"
-	@echo "  generic - Pure C (always available)"
-ifeq ($(UNAME_S),Darwin)
-	@echo "  blas    - Apple Accelerate"
-ifeq ($(UNAME_M),arm64)
-	@echo "  mps     - Metal GPU (recommended)"
-endif
-else
-	@echo "  blas    - OpenBLAS (requires libopenblas-dev)"
-endif
+	@echo "Backends: generic (pure C), blas ($(if $(filter Darwin,$(UNAME_S)),Accelerate,OpenBLAS))"
+	@echo "Metal/GPU: planned (Phase 13), not yet implemented."
 
 # =============================================================================
 # Dependencies
