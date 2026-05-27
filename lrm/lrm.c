@@ -278,15 +278,36 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
         free(density); free(triplane);
         return NULL;
     }
-    free(density);
 
     if (mc.n_vertices == 0 || mc.n_faces == 0) {
         lrm_mc_mesh_free(&mc);
-        free(triplane);
+        free(density); free(triplane);
         iris_set_error("lrm_infer: empty mesh "
                        "(threshold too high?)");
         return NULL;
     }
+
+    /* ----- 6b. Smooth per-vertex normals from the density gradient. The
+     * field is still in memory here, so normals come for free; they replace
+     * the writer's face-averaged fallback and remove MC stair-stepping from
+     * the shading without altering geometry. */
+    stage("gradient normals");
+    float *vnormals = (float *)malloc((size_t)mc.n_vertices * 3 * sizeof(float));
+    if (!vnormals) {
+        lrm_mc_mesh_free(&mc);
+        free(density); free(triplane);
+        iris_set_error("lrm_infer: oom for gradient normals");
+        return NULL;
+    }
+    if (lrm_density_gradient_normals(density, mc_res, -m->radius, +m->radius,
+                                     mc.vertices, mc.n_vertices,
+                                     mc.faces, mc.n_faces, vnormals) != 0) {
+        free(vnormals);
+        lrm_mc_mesh_free(&mc);
+        free(density); free(triplane);
+        return NULL;
+    }
+    free(density);
 
     /* ----- 7a. With --bake-texture: rasterize a UV atlas into a PNG. */
     if (opts->bake_texture) {
@@ -306,6 +327,7 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
                              mc.vertices, mc.n_vertices,
                              mc.faces, mc.n_faces, &bcfg,
                              &atlas_uvs, &tex_rgba) != 0) {
+            free(vnormals);
             lrm_mc_mesh_free(&mc);
             free(triplane);
             return NULL;
@@ -321,6 +343,7 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
         uint8_t *png_bytes = NULL;
         size_t   png_size  = 0;
         if (iris_image_encode_png(&img, &png_bytes, &png_size) != 0) {
+            free(vnormals);
             free(atlas_uvs);
             free(tex_rgba);
             lrm_mc_mesh_free(&mc);
@@ -341,10 +364,11 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
         const int Nf_saved = mc.n_faces;  /* snapshot before free */
         const int Nv_new   = 3 * Nf_saved;
         float   *new_verts = (float *)malloc((size_t)Nv_new * 3 * sizeof(float));
+        float   *new_norms = (float *)malloc((size_t)Nv_new * 3 * sizeof(float));
         int32_t *new_faces = (int32_t *)malloc((size_t)Nf_saved * 3 * sizeof(int32_t));
-        if (!new_verts || !new_faces) {
-            free(new_verts); free(new_faces);
-            free(atlas_uvs); free(png_bytes);
+        if (!new_verts || !new_norms || !new_faces) {
+            free(new_verts); free(new_norms); free(new_faces);
+            free(vnormals); free(atlas_uvs); free(png_bytes);
             lrm_mc_mesh_free(&mc);
             iris_set_error("lrm_infer: oom for vertex duplication");
             return NULL;
@@ -356,19 +380,24 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
                 new_verts[dst * 3 + 0] = mc.vertices[src * 3 + 0];
                 new_verts[dst * 3 + 1] = mc.vertices[src * 3 + 1];
                 new_verts[dst * 3 + 2] = mc.vertices[src * 3 + 2];
+                new_norms[dst * 3 + 0] = vnormals[src * 3 + 0];
+                new_norms[dst * 3 + 1] = vnormals[src * 3 + 1];
+                new_norms[dst * 3 + 2] = vnormals[src * 3 + 2];
                 new_faces[i * 3 + k]   = dst;
             }
         }
+        free(vnormals);
         lrm_mc_mesh_free(&mc);  /* original indexed buffers no longer needed */
 
         lrm_mesh *mesh = lrm_mesh_from_buffers(Nv_new, new_verts,
                                                Nf_saved, new_faces,
                                                /*vertex_colors=*/NULL);
         if (!mesh) {
-            free(new_verts); free(new_faces);
+            free(new_verts); free(new_norms); free(new_faces);
             free(atlas_uvs); free(png_bytes);
             return NULL;
         }
+        lrm_mesh_set_normals(mesh, new_norms);
         lrm_mesh_set_texture(mesh, atlas_uvs, png_bytes, png_size);
         stage_done();
         return mesh;
@@ -381,6 +410,7 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
     float *vertex_colors = (float *)malloc(
         (size_t)mc.n_vertices * 4 * sizeof(float));
     if (!vertex_colors) {
+        free(vnormals);
         lrm_mc_mesh_free(&mc);
         free(triplane);
         iris_set_error("lrm_infer: oom for vertex colors");
@@ -388,6 +418,7 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
     }
     if (query_vertex_colors(m, triplane, mc.vertices, mc.n_vertices,
                             vertex_colors) != 0) {
+        free(vnormals);
         free(vertex_colors);
         lrm_mc_mesh_free(&mc);
         free(triplane);
@@ -400,10 +431,12 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
                                            mc.n_faces, mc.faces,
                                            vertex_colors);
     if (!mesh) {
+        free(vnormals);
         free(vertex_colors);
         lrm_mc_mesh_free(&mc);
         return NULL;
     }
+    lrm_mesh_set_normals(mesh, vnormals);
     /* lrm_mesh took the buffers; null them in mc so its free() doesn't
      * double-free. */
     mc.vertices = NULL;

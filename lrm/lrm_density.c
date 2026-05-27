@@ -24,6 +24,7 @@
 
 #include "lrm_density.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -400,5 +401,82 @@ int lrm_density_build_sparse(const lrm_triplane_sample_cfg *sample_cfg,
     scratch_free(&s);
     free(idx);
     free(lin);
+    return 0;
+}
+
+/* ========================================================================
+ * Analytic gradient normals
+ * ======================================================================== */
+
+/* Trilinear sample of the density grid at fractional grid coords (gi,gj,gk),
+ * clamped to the valid [0, R-1] range. */
+static float sample_density(const float *d, int R, float gi, float gj, float gk) {
+    if (gi < 0.0f) gi = 0.0f; else if (gi > (float)(R - 1)) gi = (float)(R - 1);
+    if (gj < 0.0f) gj = 0.0f; else if (gj > (float)(R - 1)) gj = (float)(R - 1);
+    if (gk < 0.0f) gk = 0.0f; else if (gk > (float)(R - 1)) gk = (float)(R - 1);
+    int i0 = (int)gi, j0 = (int)gj, k0 = (int)gk;
+    int i1 = (i0 < R - 1) ? i0 + 1 : i0;
+    int j1 = (j0 < R - 1) ? j0 + 1 : j0;
+    int k1 = (k0 < R - 1) ? k0 + 1 : k0;
+    float ti = gi - (float)i0, tj = gj - (float)j0, tk = gk - (float)k0;
+#define D(a,b,c) d[(((size_t)(a) * R + (b)) * R + (c))]
+    float c00 = D(i0,j0,k0) + tk * (D(i0,j0,k1) - D(i0,j0,k0));
+    float c01 = D(i0,j1,k0) + tk * (D(i0,j1,k1) - D(i0,j1,k0));
+    float c10 = D(i1,j0,k0) + tk * (D(i1,j0,k1) - D(i1,j0,k0));
+    float c11 = D(i1,j1,k0) + tk * (D(i1,j1,k1) - D(i1,j1,k0));
+#undef D
+    float c0 = c00 + tj * (c01 - c00);
+    float c1 = c10 + tj * (c11 - c10);
+    return c0 + ti * (c1 - c0);
+}
+
+int lrm_density_gradient_normals(const float *density, int R,
+                                 float world_min, float world_max,
+                                 const float *vertices, int Nv,
+                                 const int32_t *faces, int Nf,
+                                 float *out_normals) {
+    if (!density || !vertices || !out_normals || R < 2 || Nv <= 0) {
+        iris_set_error("lrm_density_gradient_normals: bad arguments");
+        return -1;
+    }
+    const float span = world_max - world_min;
+    const float to_grid = (span != 0.0f) ? (float)(R - 1) / span : 0.0f;
+    const float h = 1.0f;   /* one grid cell, in grid coords */
+    (void)faces; (void)Nf;
+
+    /* The density field unambiguously defines inside vs outside: density is
+     * large inside the object and small outside, so its gradient points
+     * inward (toward increasing density) and the outward surface normal is
+     * exactly the negated, normalized gradient. No reference to the triangle
+     * winding is needed (and indeed must be avoided: the marching-cubes
+     * winding here is inverted, so aligning to it would point normals
+     * inward). Central differences over one grid cell give a smooth field
+     * normal that removes MC stair-stepping from the shading. */
+    for (int v = 0; v < Nv; v++) {
+        const float *p = vertices + (size_t)v * 3;
+        float gi = (p[0] - world_min) * to_grid;
+        float gj = (p[1] - world_min) * to_grid;
+        float gk = (p[2] - world_min) * to_grid;
+        float dx = sample_density(density, R, gi + h, gj, gk)
+                 - sample_density(density, R, gi - h, gj, gk);
+        float dy = sample_density(density, R, gi, gj + h, gk)
+                 - sample_density(density, R, gi, gj - h, gk);
+        float dz = sample_density(density, R, gi, gj, gk + h)
+                 - sample_density(density, R, gi, gj, gk - h);
+        float nx = -dx, ny = -dy, nz = -dz;   /* outward = -gradient */
+        float len = sqrtf(nx*nx + ny*ny + nz*nz);
+        if (len > 1e-12f) {
+            float inv = 1.0f / len;
+            nx *= inv; ny *= inv; nz *= inv;
+        } else {
+            /* Degenerate (flat field at the vertex) - rare. Leave a unit
+             * +Z so the GLB stays valid; with doubleSided shading this has
+             * no visible effect. */
+            nx = 0.0f; ny = 0.0f; nz = 1.0f;
+        }
+        out_normals[v*3+0] = nx;
+        out_normals[v*3+1] = ny;
+        out_normals[v*3+2] = nz;
+    }
     return 0;
 }

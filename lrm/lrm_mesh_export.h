@@ -45,6 +45,11 @@ struct lrm_mesh {
     float   *vertices;        /* [n_vertices, 3] world-space, owned */
     int32_t *faces;           /* [n_faces, 3] vertex indices, owned */
     float   *vertex_colors;   /* [n_vertices, 4] RGBA in [0, 1], owned, or NULL */
+    float   *normals;         /* [n_vertices, 3] unit normals, owned, or NULL.
+                               * If NULL the GLB writer computes area-weighted
+                               * face-averaged normals; if set (e.g. analytic
+                               * density-gradient normals) the writer emits
+                               * them verbatim. */
     float   *uvs;             /* [n_vertices, 2] in [0, 1], owned, or NULL */
     uint8_t *texture_png;     /* encoded PNG bytes (whole file), owned, or NULL */
     size_t   texture_png_size;
@@ -67,5 +72,10 @@ lrm_mesh *lrm_mesh_from_buffers(int n_vertices, float *vertices,
 void lrm_mesh_set_texture(lrm_mesh *mesh,
                           float *uvs,
                           uint8_t *texture_png, size_t texture_png_size);
+
+/* Attach precomputed per-vertex unit normals ([n_vertices, 3]). Transfers
+ * ownership; replaces any previously attached normals. Pass NULL to clear
+ * (the writer then falls back to face-averaged normals). */
+void lrm_mesh_set_normals(lrm_mesh *mesh, float *normals);
 
 #endif /* LRM_LRM_MESH_EXPORT_H */

@@ -573,9 +573,17 @@ int lrm_marching_cubes_extract(const float *volume, int R,
                     }
                     if (grow_ints(&faces, &faces_cap,
                                   (faces_n + 1) * 3) != 0) goto fail;
+                    /* Emit with reversed winding (v0, v2, v1). Our cube_index
+                     * sets a corner bit when density > threshold ("inside"),
+                     * which is the opposite of Paul Bourke's val < isolevel
+                     * convention the tri_table is authored for; without this
+                     * swap every triangle faces inward (negative signed
+                     * volume). Reversing makes the mesh canonically
+                     * CCW-outward, so consumers that recompute normals from
+                     * the winding (and our analytic gradient normals) agree. */
                     faces[faces_n * 3 + 0] = v0;
-                    faces[faces_n * 3 + 1] = v1;
-                    faces[faces_n * 3 + 2] = v2;
+                    faces[faces_n * 3 + 1] = v2;
+                    faces[faces_n * 3 + 2] = v1;
                     faces_n++;
                 }
             }

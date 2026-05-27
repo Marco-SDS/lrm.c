@@ -52,6 +52,7 @@ void lrm_mesh_free(lrm_mesh *m) {
     free(m->vertices);
     free(m->faces);
     free(m->vertex_colors);
+    free(m->normals);
     free(m->uvs);
     free(m->texture_png);
     free(m);
@@ -65,6 +66,12 @@ void lrm_mesh_set_texture(lrm_mesh *m, float *uvs,
     m->uvs              = uvs;
     m->texture_png      = texture_png;
     m->texture_png_size = texture_png_size;
+}
+
+void lrm_mesh_set_normals(lrm_mesh *m, float *normals) {
+    if (!m) return;
+    free(m->normals);
+    m->normals = normals;
 }
 
 /* ========================================================================
@@ -236,13 +243,22 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
         }
     }
 
-    /* Compute per-vertex normals (required for material shading). */
-    float *normals = (float *)malloc((size_t)Nv * 3 * sizeof(float));
+    /* Per-vertex normals (required for material shading). If the mesh
+     * carries precomputed normals (e.g. analytic density-gradient normals
+     * from inference) emit them verbatim; otherwise fall back to
+     * area-weighted face-averaged normals. */
+    float *normals_owned = NULL;
+    const float *normals = mesh->normals;
     if (!normals) {
-        iris_set_error("lrm_mesh_save_glb: oom for normals");
-        return -1;
+        normals_owned = (float *)malloc((size_t)Nv * 3 * sizeof(float));
+        if (!normals_owned) {
+            iris_set_error("lrm_mesh_save_glb: oom for normals");
+            return -1;
+        }
+        compute_vertex_normals(mesh->vertices, Nv, mesh->faces, Nf,
+                               normals_owned);
+        normals = normals_owned;
     }
-    compute_vertex_normals(mesh->vertices, Nv, mesh->faces, Nf, normals);
 
     /* Convert vertex colors to u8 normalized RGBA. Smaller (4x) and
      * universally readable by viewers; matches trimesh's exported GLB. */
@@ -307,7 +323,7 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
         for (int i = 0; i < Ni; i++) {
             int32_t v = mesh->faces[i];
             if (v < 0 || v > 65535) {
-                free(tmp); free(normals); free(colors_u8);
+                free(tmp); free(normals_owned); free(colors_u8);
                 iris_set_error("lrm_mesh_save_glb: index out of u16 range");
                 free(bin.data);
                 return -1;
@@ -332,8 +348,8 @@ int lrm_mesh_save_glb(const lrm_mesh *mesh, const char *path) {
     if (bb_pad_to_4(&bin, 0) != 0) goto oom;
 
     /* Done with the per-vertex scratch. */
-    free(normals);   normals   = NULL;
-    free(colors_u8); colors_u8 = NULL;
+    free(normals_owned); normals_owned = NULL;
+    free(colors_u8);     colors_u8 = NULL;
 
     /* ----- Build the JSON chunk. Accessor indices (running counter):
      *   0  POSITION   (always)
@@ -539,9 +555,9 @@ fail_io:
 oom_js:
     free(js.data);
 oom:
-    /* normals / colors_u8 may still be live if we OOM'd while writing
+    /* normals_owned / colors_u8 may still be live if we OOM'd while writing
      * the BIN chunk (they are freed and nulled after BIN completes). */
-    free(normals);
+    free(normals_owned);
     free(colors_u8);
     free(bin.data);
     iris_set_error("lrm_mesh_save_glb: out of memory");
