@@ -60,7 +60,7 @@ FG     ?= 0.85
 TEX_FLAGS = $(if $(filter 1 yes on true,$(TEX)),--bake-texture --texture-resolution $(TEXRES),)
 BG_FLAGS  = $(if $(filter 1 yes on true,$(BG)),--remove-bg,)
 
-.PHONY: all help generic blas run check debug lib install info clean \
+.PHONY: all help generic blas run check eval debug lib install info clean \
         test test-dino test-decoder test-upsample test-density test-u2net \
         test-density-sparse test-mc test-glb
 
@@ -86,7 +86,8 @@ help:
 	@echo "    MODEL  model directory        (default: $(MODEL))"
 	@echo ""
 	@echo "Validate / develop:"
-	@echo "  make check    - run all parity tests vs the PyTorch reference"
+	@echo "  make check    - run all per-stage parity tests vs the PyTorch reference"
+	@echo "  make eval     - end-to-end mesh fidelity (Chamfer + F-score) vs golden"
 	@echo "  make clean    - remove build artifacts"
 	@echo "  make lib      - build static library ($(LIB))"
 	@echo "  make info     - show build configuration"
@@ -132,6 +133,22 @@ run:
 	    echo ""; echo "Inspecting $(OUT):"; \
 	    triposr_env/.venv/bin/python debug/debug_mesh.py $(OUT); \
 	fi
+
+# =============================================================================
+# End-to-end mesh fidelity vs the PyTorch TripoSR reference
+# =============================================================================
+# Runs the full C pipeline (robot.png, 64^3) and compares the mesh against the
+# golden PyTorch mesh with Chamfer + F-score (tools/mesh_metrics.py). This is
+# the end-to-end counterpart to the per-stage `make check` parity tests.
+eval:
+	@test -x ./$(TARGET) || $(MAKE) blas
+	@echo "Running e2e (robot.png, 64^3) for fidelity vs golden ..."
+	@./$(TARGET) infer triposr_env triposr_env/examples/robot.png \
+	    -o /tmp/lrm_eval.glb --mc-resolution 64 >/dev/null 2>&1 || \
+	    (echo "FAIL: inference"; exit 1)
+	@triposr_env/.venv/bin/python tools/mesh_metrics.py \
+	    /tmp/lrm_eval.glb tests/golden/triposr/mesh --max-chamfer 0.012
+	@rm -f /tmp/lrm_eval.glb
 
 # =============================================================================
 # Parity tests (numerical correctness vs the PyTorch reference)

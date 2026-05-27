@@ -95,6 +95,8 @@ tools/               - dev-time Python helpers (NOT in hot path)
   check_glb.py
   u2net_to_safetensors.py      (convert u2net.pth -> safetensors)
   u2net_extract_golden.py      (U2Net PyTorch parity reference)
+  mesh_metrics.py              (Chamfer + F-score between two meshes;
+                                used by `make eval` for e2e fidelity)
 
 debug/               - debugging aids for the lrm pipeline
   debug_stage_compare.py       (inspect / diff a stage tensor vs golden)
