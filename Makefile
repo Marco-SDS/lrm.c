@@ -40,7 +40,7 @@ endif
 # lrm/ = ALL LRM-specific code. Binary is `lrmc` (avoids the ./lrm file vs
 # lrm/ directory clash); static library is liblrmc.a.
 INFRA_SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
-LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c lrm/lrm_triplane_upsample.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c lrm/lrm_density.c lrm/lrm_marching_cubes.c lrm/lrm_mesh_export.c lrm/lrm_bake_texture.c
+LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c lrm/lrm_triplane_upsample.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c lrm/lrm_density.c lrm/lrm_marching_cubes.c lrm/lrm_mesh_export.c lrm/lrm_bake_texture.c lrm/lrm_u2net.c
 SRCS       = $(INFRA_SRCS) $(LRM_SRCS)
 OBJS       = $(SRCS:.c=.o)
 TARGET     = lrmc
@@ -58,7 +58,7 @@ TEXRES ?= 2048
 TEX_FLAGS = $(if $(filter 1 yes on true,$(TEX)),--bake-texture --texture-resolution $(TEXRES),)
 
 .PHONY: all help generic blas run check debug lib install info clean \
-        test test-dino test-decoder test-upsample test-density \
+        test test-dino test-decoder test-upsample test-density test-u2net \
         test-density-sparse test-mc test-glb
 
 # Default: show available targets
@@ -133,7 +133,7 @@ run:
 # =============================================================================
 # `make check` runs the whole suite; individual targets are available for
 # debugging a single stage.
-check: test test-dino test-decoder test-upsample test-density \
+check: test test-dino test-decoder test-upsample test-density test-u2net \
        test-density-sparse test-mc test-glb
 	@echo ""
 	@echo "PASS  all parity tests"
@@ -181,6 +181,15 @@ test-density:
 	    $(BLAS_LDFLAGS) -lm -o /tmp/lrm_test_density
 	@/tmp/lrm_test_density
 	@rm -f /tmp/lrm_test_density
+
+test-u2net:
+	@echo "[u2net] background-removal forward parity ..."
+	@$(CC) $(CFLAGS_BASE) $(BLAS_CFLAGS) \
+	    tests/model/test_u2net.c lrm/lrm_u2net.c \
+	    iris.c iris_kernels.c iris_safetensors.c \
+	    $(BLAS_LDFLAGS) -lm -o /tmp/lrm_test_u2net
+	@/tmp/lrm_test_u2net
+	@rm -f /tmp/lrm_test_u2net
 
 test-density-sparse:
 	@echo "[geometry] sparse-vs-dense density MC parity ..."
@@ -246,6 +255,7 @@ lrm/lrm_triplane_upsample.o: lrm/lrm_triplane_upsample.c lrm/lrm_triplane_upsamp
 lrm/lrm_triplane_sample.o: lrm/lrm_triplane_sample.c lrm/lrm_triplane_sample.h iris.h iris_kernels.h
 lrm/lrm_nerf_mlp.o: lrm/lrm_nerf_mlp.c lrm/lrm_nerf_mlp.h iris.h iris_kernels.h iris_safetensors.h
 lrm/lrm_density.o: lrm/lrm_density.c lrm/lrm_density.h lrm/lrm_triplane_sample.h lrm/lrm_nerf_mlp.h iris.h
+lrm/lrm_u2net.o: lrm/lrm_u2net.c lrm/lrm_u2net.h iris.h iris_kernels.h iris_safetensors.h
 lrm/lrm_marching_cubes.o: lrm/lrm_marching_cubes.c lrm/lrm_marching_cubes.h iris.h
 lrm/lrm_mesh_export.o: lrm/lrm_mesh_export.c lrm/lrm_mesh_export.h lrm/lrm.h iris.h
 lrm/lrm_bake_texture.o: lrm/lrm_bake_texture.c lrm/lrm_bake_texture.h lrm/lrm_triplane_sample.h lrm/lrm_nerf_mlp.h iris.h iris_kernels.h

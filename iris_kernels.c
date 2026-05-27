@@ -7,6 +7,7 @@
 
 #include "iris_kernels.h"
 #include <math.h>
+#include <float.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -492,7 +493,10 @@ void iris_maxpool2d(float *out, const float *in,
             float *out_c = out + ((size_t)b * channels + c) * oH * oW;
             for (int oh = 0; oh < oH; oh++) {
                 for (int ow = 0; ow < oW; ow++) {
-                    float m = -INFINITY;
+                    /* -FLT_MAX, not -INFINITY: -ffast-math makes inf UB. Every
+                     * output window has >=1 in-bounds element, so this seeds
+                     * the max correctly. */
+                    float m = -FLT_MAX;
                     for (int kh = 0; kh < k; kh++) {
                         int ih = oh * stride + kh;
                         if (ih >= H) continue;
