@@ -25,7 +25,7 @@ UNAME_M := $(shell uname -m)
 # binary is lrmc, library is liblrmc.a).
 
 INFRA_SRCS = iris.c iris_kernels.c iris_image.c jpeg.c iris_safetensors.c
-LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c lrm/lrm_triplane_upsample.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c lrm/lrm_marching_cubes.c lrm/lrm_mesh_export.c lrm/lrm_bake_texture.c
+LRM_SRCS   = lrm/lrm.c lrm/lrm_triposr.c lrm/lrm_vit_dino.c lrm/lrm_triplane_decoder.c lrm/lrm_triplane_upsample.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c lrm/lrm_density.c lrm/lrm_marching_cubes.c lrm/lrm_mesh_export.c lrm/lrm_bake_texture.c
 SRCS       = $(INFRA_SRCS) $(LRM_SRCS)
 OBJS       = $(SRCS:.c=.o)
 MAIN       = main.c
@@ -34,7 +34,7 @@ LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info pngtest test test-dino test-decoder test-upsample test-density test-mc test-glb test-e2e test-e2e-tex help generic blas mps
+.PHONY: all clean debug lib install info pngtest test test-dino test-decoder test-upsample test-density test-density-sparse test-mc test-glb test-e2e test-e2e-tex help generic blas mps
 .NOTPARALLEL: mps
 
 # Default: show available targets
@@ -196,6 +196,17 @@ test-density:
 	@/tmp/lrm_test_density
 	@rm -f /tmp/lrm_test_density
 
+test-density-sparse:
+	@echo "Building sparse-vs-dense density parity test..."
+	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
+	    tests/test_density_sparse.c \
+	    lrm/lrm_density.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c \
+	    lrm/lrm_marching_cubes.c \
+	    iris.c iris_kernels.c iris_safetensors.c \
+	    -framework Accelerate -lm -o /tmp/lrm_test_density_sparse
+	@/tmp/lrm_test_density_sparse
+	@rm -f /tmp/lrm_test_density_sparse
+
 test-mc:
 	@echo "Building marching cubes parity test..."
 	@$(CC) $(CFLAGS_BASE) \
@@ -223,8 +234,8 @@ test-e2e: blas
 	    -o /tmp/lrm_e2e.glb --mc-resolution 64
 	@if [ -x triposr_env/.venv/bin/python ]; then \
 	    echo ""; \
-	    echo "Verifying GLB via trimesh:"; \
-	    triposr_env/.venv/bin/python -c "import trimesh; m = trimesh.load('/tmp/lrm_e2e.glb'); g = list(m.geometry.values())[0] if hasattr(m, 'geometry') and m.geometry else m; print(f'  vertices={len(g.vertices)} faces={len(g.faces)} bounds=[{g.bounds[0]} .. {g.bounds[1]}] has_vc={g.visual.vertex_colors is not None}')"; \
+	    echo "Verifying GLB via check_glb.py:"; \
+	    triposr_env/.venv/bin/python tools/check_glb.py /tmp/lrm_e2e.glb; \
 	fi
 	@echo ""
 	@echo "PASS  end-to-end inference (/tmp/lrm_e2e.glb)"
@@ -293,6 +304,7 @@ lrm/lrm_triplane_decoder.o: lrm/lrm_triplane_decoder.c lrm/lrm_triplane_decoder.
 lrm/lrm_triplane_upsample.o: lrm/lrm_triplane_upsample.c lrm/lrm_triplane_upsample.h iris.h iris_kernels.h iris_safetensors.h
 lrm/lrm_triplane_sample.o: lrm/lrm_triplane_sample.c lrm/lrm_triplane_sample.h iris.h iris_kernels.h
 lrm/lrm_nerf_mlp.o: lrm/lrm_nerf_mlp.c lrm/lrm_nerf_mlp.h iris.h iris_kernels.h iris_safetensors.h
+lrm/lrm_density.o: lrm/lrm_density.c lrm/lrm_density.h lrm/lrm_triplane_sample.h lrm/lrm_nerf_mlp.h iris.h
 lrm/lrm_marching_cubes.o: lrm/lrm_marching_cubes.c lrm/lrm_marching_cubes.h iris.h
 lrm/lrm_mesh_export.o: lrm/lrm_mesh_export.c lrm/lrm_mesh_export.h lrm/lrm.h iris.h
 lrm/lrm_bake_texture.o: lrm/lrm_bake_texture.c lrm/lrm_bake_texture.h lrm/lrm_triplane_sample.h lrm/lrm_nerf_mlp.h iris.h iris_kernels.h

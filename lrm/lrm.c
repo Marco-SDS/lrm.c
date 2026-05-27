@@ -18,6 +18,7 @@
 
 #include "lrm.h"
 #include "lrm_bake_texture.h"
+#include "lrm_density.h"
 #include "lrm_mesh_export.h"
 #include "lrm_marching_cubes.h"
 #include "lrm_nerf_mlp.h"
@@ -89,79 +90,6 @@ static void stage_done(void) {
                 clock_ms_internal() - g_last_stage_ms);
     }
     g_last_stage_ms = 0.0;
-}
-
-/* Build the density volume by chunked sample+MLP over the MC grid.
- * Density layout: [R, R, R] C-contiguous matching extract_golden.py's
- * meshgrid('ij') view. Returns 0 on success. */
-static int build_density_grid(const lrm_model *m, const float *triplane,
-                              int R, float *density_out) {
-    const int chunk = 8192;
-    const float r = m->radius;
-    const size_t N = (size_t)R * R * R;
-
-    /* Per-chunk scratch. */
-    float *positions = (float *)malloc((size_t)chunk * 3 * sizeof(float));
-    float *features  = (float *)malloc((size_t)chunk * 120 * sizeof(float));
-    size_t ts_ws = lrm_triplane_sample_workspace_bytes(&m->sample_cfg, chunk);
-    size_t nm_ws = lrm_nerf_mlp_workspace_bytes(&m->mlp, chunk);
-    float *ts_work = (float *)malloc(ts_ws);
-    float *nm_work = (float *)malloc(nm_ws);
-    float *color_scratch = (float *)malloc((size_t)chunk * 3 * sizeof(float));
-    if (!positions || !features || !ts_work || !nm_work || !color_scratch) {
-        free(positions); free(features); free(ts_work); free(nm_work);
-        free(color_scratch);
-        iris_set_error("lrm_infer: oom in density-grid scratch");
-        return -1;
-    }
-
-    /* Precompute linspace. */
-    float *lin = (float *)malloc((size_t)R * sizeof(float));
-    if (!lin) {
-        free(positions); free(features); free(ts_work); free(nm_work);
-        free(color_scratch);
-        iris_set_error("lrm_infer: oom for linspace");
-        return -1;
-    }
-    for (int i = 0; i < R; i++) {
-        lin[i] = -r + (2.0f * r) * (float)i / (float)(R - 1);
-    }
-
-    for (size_t off = 0; off < N; off += (size_t)chunk) {
-        int n_this = (off + chunk <= N) ? chunk : (int)(N - off);
-
-        for (int q = 0; q < n_this; q++) {
-            size_t p = off + (size_t)q;
-            size_t i = p / ((size_t)R * R);
-            size_t j = (p / R) % R;
-            size_t k = p % R;
-            float *pos = positions + (size_t)q * 3;
-            pos[0] = lin[i];
-            pos[1] = lin[j];
-            pos[2] = lin[k];
-        }
-
-        if (lrm_triplane_sample_forward(&m->sample_cfg, triplane, positions,
-                                        n_this, features, ts_work) != 0) {
-            goto fail;
-        }
-        if (lrm_nerf_mlp_forward(&m->mlp, features, n_this,
-                                 density_out + off, color_scratch,
-                                 nm_work) != 0) {
-            goto fail;
-        }
-    }
-
-    free(lin);
-    free(positions); free(features); free(ts_work); free(nm_work);
-    free(color_scratch);
-    return 0;
-
-fail:
-    free(lin);
-    free(positions); free(features); free(ts_work); free(nm_work);
-    free(color_scratch);
-    return -1;
 }
 
 /* Re-query NeRF MLP at the mesh vertex positions to get vertex colors.
@@ -326,8 +254,8 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
     /* ----- 5. Build density grid for marching cubes. */
     char stage_buf[128];
     snprintf(stage_buf, sizeof(stage_buf),
-             "density grid %d^3 = %d queries (sample + NeRF MLP, chunked)",
-             mc_res, mc_res * mc_res * mc_res);
+             "density grid %d^3 (coarse-to-fine sample + NeRF MLP)",
+             mc_res);
     stage(stage_buf);
     const size_t grid_n = (size_t)mc_res * mc_res * mc_res;
     float *density = (float *)malloc(grid_n * sizeof(float));
@@ -336,7 +264,8 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
         iris_set_error("lrm_infer: oom for density grid");
         return NULL;
     }
-    if (build_density_grid(m, triplane, mc_res, density) != 0) {
+    if (lrm_density_build_sparse(&m->sample_cfg, &m->mlp, triplane, mc_res,
+                                 m->radius, thresh, density) != 0) {
         free(density); free(triplane);
         return NULL;
     }
