@@ -287,6 +287,16 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
         return NULL;
     }
 
+    /* ----- 6a. Drop disconnected floater components (specks the density
+     * field leaves around the main object). Keep anything >= 1% of the
+     * largest component's triangle count. */
+    stage("floater removal");
+    if (lrm_mc_remove_small_components(&mc, 0.01f) != 0) {
+        lrm_mc_mesh_free(&mc);
+        free(density); free(triplane);
+        return NULL;
+    }
+
     /* ----- 6b. Smooth per-vertex normals from the density gradient. The
      * field is still in memory here, so normals come for free; they replace
      * the writer's face-averaged fallback and remove MC stair-stepping from

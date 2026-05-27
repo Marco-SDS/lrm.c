@@ -119,6 +119,70 @@ static double bbox_diagonal(const float *v, int n) {
     return sqrt(dx*dx + dy*dy + dz*dz);
 }
 
+/* Synthetic test: a big solid block plus a tiny isolated blob in a corner.
+ * lrm_mc_remove_small_components must drop the blob and keep the block.
+ * Returns the number of failed checks. */
+static int test_floater_removal(void) {
+    const int R = 16;
+    float *vol = (float *)calloc((size_t)R * R * R, sizeof(float));
+    if (!vol) { fprintf(stderr, "FAIL: oom synthetic volume\n"); return 1; }
+#define V(i,j,k) vol[(((size_t)(i) * R + (j)) * R + (k))]
+    for (int i = 4; i <= 11; i++)        /* big central block */
+        for (int j = 4; j <= 11; j++)
+            for (int k = 4; k <= 11; k++) V(i,j,k) = 100.0f;
+    for (int i = 1; i <= 2; i++)         /* tiny corner blob */
+        for (int j = 1; j <= 2; j++)
+            for (int k = 1; k <= 2; k++) V(i,j,k) = 100.0f;
+#undef V
+
+    lrm_mc_mesh m = {0};
+    if (lrm_marching_cubes_extract(vol, R, THRESH, -RADIUS, +RADIUS, &m) != 0) {
+        fprintf(stderr, "FAIL: synthetic extract: %s\n", iris_get_error());
+        free(vol); return 1;
+    }
+    int nf_before = m.n_faces;
+
+    /* fraction<=0 must be a no-op. */
+    int fails = 0;
+    lrm_mc_mesh probe = {0};
+    lrm_marching_cubes_extract(vol, R, THRESH, -RADIUS, +RADIUS, &probe);
+    if (lrm_mc_remove_small_components(&probe, 0.0f) != 0 ||
+        probe.n_faces != nf_before) {
+        fprintf(stderr, "  FAIL floater no-op: %d -> %d (expected unchanged)\n",
+                nf_before, probe.n_faces);
+        fails++;
+    }
+    lrm_mc_mesh_free(&probe);
+
+    if (lrm_mc_remove_small_components(&m, 0.1f) != 0) {
+        fprintf(stderr, "  FAIL floater removal: %s\n", iris_get_error());
+        free(vol); lrm_mc_mesh_free(&m); return fails + 1;
+    }
+    /* The corner blob lives near world x ~ -0.75; the block spans ~[-0.4,0.4].
+     * After removal no surviving vertex should sit in the far-negative
+     * corner. */
+    float minc = 1e30f;
+    for (int v = 0; v < m.n_vertices; v++)
+        for (int c = 0; c < 3; c++)
+            if (m.vertices[v*3+c] < minc) minc = m.vertices[v*3+c];
+    if (m.n_faces >= nf_before || m.n_faces == 0) {
+        fprintf(stderr, "  FAIL floater face count: %d -> %d\n",
+                nf_before, m.n_faces);
+        fails++;
+    }
+    if (minc < -0.6f) {
+        fprintf(stderr, "  FAIL floater not removed: min coord %.3f\n", minc);
+        fails++;
+    }
+    if (fails == 0) {
+        fprintf(stderr, "  PASS floater removal: faces %d -> %d, min coord %.3f\n",
+                nf_before, m.n_faces, minc);
+    }
+    free(vol);
+    lrm_mc_mesh_free(&m);
+    return fails;
+}
+
 int main(void) {
     /* ----- Load density volume. */
     size_t db;
@@ -221,11 +285,15 @@ int main(void) {
 
     lrm_mc_mesh_free(&mesh);
 
+    /* ----- Floater-removal synthetic test. */
+    fprintf(stderr, "floater removal (synthetic two-component volume):\n");
+    failures += test_floater_removal();
+
     if (failures == 0) {
-        printf("\nPASS  marching_cubes structural parity (4/4 checks)\n");
+        printf("\nPASS  marching_cubes structural parity + floater removal\n");
         return 0;
     }
-    fprintf(stderr, "\nFAIL  marching_cubes parity (%d/4 checks failed)\n",
+    fprintf(stderr, "\nFAIL  marching_cubes (%d checks failed)\n",
             failures);
     return 1;
 }

@@ -53,6 +53,22 @@ int lrm_marching_cubes_extract(const float *volume, int R,
                                float world_min, float world_max,
                                lrm_mc_mesh *mesh);
 
+/*
+ * Remove small disconnected components ("floaters") in place. Vertices are
+ * grouped into connected components via shared faces (union-find); any
+ * component whose triangle count is below `min_fraction` of the largest
+ * component's triangle count is discarded, and the surviving vertices/faces
+ * are compacted (indices remapped). The largest component is always kept.
+ *
+ * This cleans up the spurious detached blobs TripoSR density fields produce
+ * around the main object without affecting the main surface. Pass
+ * min_fraction <= 0 to disable (no-op).
+ *
+ * Returns 0 on success, -1 with iris_get_error() set on failure. On success
+ * mesh->n_vertices / n_faces and the buffers reflect the cleaned mesh.
+ */
+int lrm_mc_remove_small_components(lrm_mc_mesh *mesh, float min_fraction);
+
 void lrm_mc_mesh_free(lrm_mc_mesh *mesh);
 
 #endif /* LRM_LRM_MARCHING_CUBES_H */

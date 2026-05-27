@@ -614,6 +614,125 @@ fail:
     return -1;
 }
 
+/* ========================================================================
+ * Connected-component floater removal
+ * ======================================================================== */
+
+static int uf_find(int *parent, int x) {
+    while (parent[x] != x) {
+        parent[x] = parent[parent[x]];  /* path halving */
+        x = parent[x];
+    }
+    return x;
+}
+
+static void uf_union(int *parent, int a, int b) {
+    int ra = uf_find(parent, a), rb = uf_find(parent, b);
+    if (ra != rb) parent[ra] = rb;
+}
+
+int lrm_mc_remove_small_components(lrm_mc_mesh *mesh, float min_fraction) {
+    if (!mesh) return set_err("remove_components: NULL mesh");
+    if (min_fraction <= 0.0f || mesh->n_vertices <= 0 || mesh->n_faces <= 0) {
+        return 0;  /* disabled or empty */
+    }
+    const int Nv = mesh->n_vertices;
+    const int Nf = mesh->n_faces;
+
+    int *parent = (int *)malloc((size_t)Nv * sizeof(int));
+    int *fcount = (int *)calloc((size_t)Nv, sizeof(int));  /* faces per root */
+    if (!parent || !fcount) {
+        free(parent); free(fcount);
+        return set_err("remove_components: oom (union-find)");
+    }
+    for (int v = 0; v < Nv; v++) parent[v] = v;
+    for (int f = 0; f < Nf; f++) {
+        int a = mesh->faces[f*3+0], b = mesh->faces[f*3+1], c = mesh->faces[f*3+2];
+        uf_union(parent, a, b);
+        uf_union(parent, b, c);
+    }
+    /* Tally triangles per component root and find the largest. */
+    int max_faces = 0;
+    for (int f = 0; f < Nf; f++) {
+        int r = uf_find(parent, mesh->faces[f*3+0]);
+        fcount[r]++;
+        if (fcount[r] > max_faces) max_faces = fcount[r];
+    }
+    int min_faces = (int)(min_fraction * (float)max_faces);
+    if (min_faces < 1) min_faces = 1;
+
+    /* Build a compacted vertex remap for vertices in kept components. */
+    int *vmap = (int *)malloc((size_t)Nv * sizeof(int));
+    if (!vmap) {
+        free(parent); free(fcount);
+        return set_err("remove_components: oom (vmap)");
+    }
+    for (int v = 0; v < Nv; v++) vmap[v] = -1;
+
+    float   *nv = (float *)malloc((size_t)Nv * 3 * sizeof(float));
+    int32_t *nf = (int32_t *)malloc((size_t)Nf * 3 * sizeof(int32_t));
+    if (!nv || !nf) {
+        free(parent); free(fcount); free(vmap); free(nv); free(nf);
+        return set_err("remove_components: oom (compacted buffers)");
+    }
+
+    int out_nv = 0, out_nf = 0, removed_comp = 0;
+    for (int f = 0; f < Nf; f++) {
+        int r = uf_find(parent, mesh->faces[f*3+0]);
+        if (fcount[r] < min_faces) continue;  /* drop floater face */
+        int32_t out_idx[3];
+        for (int k = 0; k < 3; k++) {
+            int v = mesh->faces[f*3+k];
+            if (vmap[v] < 0) {
+                vmap[v] = out_nv;
+                nv[out_nv*3+0] = mesh->vertices[v*3+0];
+                nv[out_nv*3+1] = mesh->vertices[v*3+1];
+                nv[out_nv*3+2] = mesh->vertices[v*3+2];
+                out_nv++;
+            }
+            out_idx[k] = vmap[v];
+        }
+        nf[out_nf*3+0] = out_idx[0];
+        nf[out_nf*3+1] = out_idx[1];
+        nf[out_nf*3+2] = out_idx[2];
+        out_nf++;
+    }
+    /* Count dropped components for diagnostics. */
+    for (int v = 0; v < Nv; v++) {
+        if (parent[v] == v && fcount[v] > 0 && fcount[v] < min_faces) {
+            removed_comp++;
+        }
+    }
+
+    free(parent); free(fcount); free(vmap);
+
+    if (out_nf == 0) {
+        /* min_fraction too aggressive - keep the original mesh untouched. */
+        free(nv); free(nf);
+        return set_err("remove_components: would empty the mesh");
+    }
+
+    /* Swap in the compacted buffers (trim to exact size). */
+    float *nv2 = (float *)realloc(nv, (size_t)out_nv * 3 * sizeof(float));
+    if (nv2) nv = nv2;
+    int32_t *nf2 = (int32_t *)realloc(nf, (size_t)out_nf * 3 * sizeof(int32_t));
+    if (nf2) nf = nf2;
+
+    free(mesh->vertices);
+    free(mesh->faces);
+    mesh->vertices   = nv;
+    mesh->faces      = nf;
+    mesh->n_vertices = out_nv;
+    mesh->n_faces    = out_nf;
+
+    if (getenv("LRM_TIMING")) {
+        fprintf(stderr,
+                "lrmc:   (floaters: dropped %d components, V %d->%d F %d->%d)\n",
+                removed_comp, Nv, out_nv, Nf, out_nf);
+    }
+    return 0;
+}
+
 void lrm_mc_mesh_free(lrm_mc_mesh *mesh) {
     if (!mesh) return;
     free(mesh->vertices);
