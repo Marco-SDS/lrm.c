@@ -74,11 +74,19 @@ The output `robot.glb` opens in
 [gltf-viewer.donmccurdy.com](https://gltf-viewer.donmccurdy.com/),
 or any other glTF 2.0 viewer with PBR material, normals, and vertex colors.
 
-The input image should be a 512×512 PNG with an alpha mask (TripoSR is
-fragile to background noise). The example PNGs under `triposr_env/examples/`
-are pre-cleaned; for arbitrary photos, run [`rembg`](https://github.com/danielgatis/rembg)
-externally first. A C-native background-removal step is on the roadmap
-([LRMengine.md](LRMengine.md) Phase 16).
+TripoSR is fragile to background noise, so the foreground must be isolated.
+For an arbitrary photo, add `--remove-bg`: the engine segments the foreground
+with a vendored U2Net (the model `rembg` uses, ported to pure C — Phase 16)
+and feeds the mask as alpha, no external tools or Python needed:
+
+```bash
+./lrmc infer triposr_env my_photo.jpg -o out.glb --remove-bg
+# (one-time: convert the U2Net weights, see tools/u2net_to_safetensors.py)
+```
+
+Without `--remove-bg`, the input is expected to carry an alpha mask already
+(transparent regions become gray 0.5); the example PNGs under
+`triposr_env/examples/` are pre-cleaned.
 
 ## Build matrix
 
@@ -101,6 +109,10 @@ lrmc info  <model_dir|.safetensors>
 lrmc infer <model_dir> <image> -o <output.glb> [options]
     --mc-resolution N   Marching cubes grid resolution (default 256).
     --threshold     V   Density threshold (default 25.0).
+    --remove-bg         Segment the foreground with U2Net (for raw photos).
+    --bg-model      P   U2Net safetensors (default <model_dir>/u2net.safetensors).
+    --bake-texture      Emit a UV atlas + PNG texture instead of vertex colors.
+    --texture-resolution N   Atlas size (default 2048; only with --bake-texture).
 
 LRM_TIMING=1 lrmc infer ...
     Per-stage walltime to stderr (preprocess, encoder, decoder, ...).

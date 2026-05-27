@@ -13,8 +13,13 @@ filesystem collision; see LRMengine.md §3).
 Single end-to-end command:
 
 ```
-./lrmc infer <model_dir> <image> -o <output.glb> [--mc-resolution N]
+./lrmc infer <model_dir> <image> -o <output.glb> [--mc-resolution N] [--remove-bg]
 ```
+
+With `--remove-bg` the engine first segments the foreground with a vendored
+U2Net (Phase 16, lrm_u2net.c) so an arbitrary photo (no alpha mask needed)
+can be reconstructed — zero Python at runtime. Without it the input is
+expected to carry an alpha mask (transparent regions become gray 0.5).
 
 produces a binary glTF 2.0 file with PBR material, analytic gradient
 normals, and vertex colors. The pipeline is image → DINO ViT-B/16 →
@@ -46,8 +51,9 @@ the `features` branch).
 ```
 iris.c               - generic coordinator (error string, dispatch)
 iris.h               - minimal public API (image I/O, opaque types)
-iris_kernels.c/.h    - CPU compute primitives (matmul, attention, conv2d,
-                       LN/GN/BN, GELU/GEGLU/SiLU, grid_sample, RoPE)
+iris_kernels.c/.h    - CPU compute primitives (matmul, attention, conv2d
+                       w/ dilation, maxpool2d, bilinear upsample, LN/GN/BN,
+                       GELU/GEGLU/SiLU/ReLU/sigmoid, grid_sample, RoPE)
 iris_metal.m/.h      - Metal runtime (kept; kernels TBD in Phase 13)
 iris_shaders.metal   - Metal compute shaders (kept; trimmed in Phase 13)
 iris_safetensors.c/.h - mmap'd weight loader (zero-copy)
@@ -67,6 +73,7 @@ lrm/                 - ALL LRM-specific code
   lrm_marching_cubes.c/.h      - Lorensen-Cline MC + dedup + floater removal
   lrm_mesh_export.c/.h         - binary glTF 2.0 writer (PBR material, normals)
   lrm_bake_texture.c/.h        - per-triangle UV atlas + NeRF texel bake
+  lrm_u2net.c/.h               - U2Net salient-object segmentation (--remove-bg)
 
 tests/               - test suite, split by concern
   model/             - numerical parity vs the PyTorch reference
@@ -75,6 +82,7 @@ tests/               - test suite, split by concern
     test_triplane_decoder.c
     test_triplane_upsample.c
     test_density_64.c          (sampler + NeRF MLP)
+    test_u2net.c               (background-removal forward)
   geometry/          - mesh-construction correctness
     test_density_sparse.c      (coarse-to-fine vs dense MC, bit-identical)
     test_marching_cubes.c      (structural parity + floater removal)
@@ -85,6 +93,8 @@ tools/               - dev-time Python helpers (NOT in hot path)
   ckpt_to_safetensors.py
   extract_golden.py
   check_glb.py
+  u2net_to_safetensors.py      (convert u2net.pth -> safetensors)
+  u2net_extract_golden.py      (U2Net PyTorch parity reference)
 
 debug/               - debugging aids for the lrm pipeline
   debug_stage_compare.py       (inspect / diff a stage tensor vs golden)
