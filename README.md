@@ -109,6 +109,8 @@ lrmc info  <model_dir|.safetensors>
 lrmc infer <model_dir> <image> -o <output.glb> [options]
     --mc-resolution N   Marching cubes grid resolution (default 256).
     --threshold     V   Density threshold (default 25.0).
+    --foreground-ratio V  Object size in the frame, (0,1] (default 0.85).
+                          Sweeping 0.80/0.85/0.90/0.95 is the top input-quality knob.
     --remove-bg         Segment the foreground with U2Net (for raw photos).
     --bg-model      P   U2Net safetensors (default <model_dir>/u2net.safetensors).
     --bake-texture      Emit a UV atlas + PNG texture instead of vertex colors.

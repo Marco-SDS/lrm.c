@@ -380,6 +380,7 @@ void lrm_triposr_print_tree(const struct lrm_model *m, FILE *out) {
 
 int lrm_triposr_preprocess(const struct lrm_model *m,
                            const iris_image *im,
+                           float fg_ratio,
                            float *out_chw) {
     if (!m || !im || !im->data || !out_chw) {
         iris_set_error("preprocess: NULL argument");
@@ -391,7 +392,9 @@ int lrm_triposr_preprocess(const struct lrm_model *m,
     }
 
     const int target = m->cond_image_size;     /* 512 */
-    const float fg_ratio = 0.85f;
+    /* Clamp to a sane range; <= 0 means "use the TripoSR default". */
+    if (fg_ratio <= 0.0f) fg_ratio = 0.85f;
+    if (fg_ratio > 1.0f)  fg_ratio = 1.0f;
     const int H = im->height;
     const int W = im->width;
     const int C = im->channels;

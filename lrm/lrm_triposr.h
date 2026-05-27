@@ -90,6 +90,7 @@ struct lrm_model {
  */
 int lrm_triposr_preprocess(const struct lrm_model *m,
                            const iris_image *im,
+                           float fg_ratio,
                            float *out_chw);
 
 /* Open a TripoSR safetensors file (path can be a directory containing

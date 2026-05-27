@@ -56,6 +56,7 @@ RES    ?= 256
 TEX    ?= 0
 TEXRES ?= 2048
 BG     ?= 0
+FG     ?= 0.85
 TEX_FLAGS = $(if $(filter 1 yes on true,$(TEX)),--bake-texture --texture-resolution $(TEXRES),)
 BG_FLAGS  = $(if $(filter 1 yes on true,$(BG)),--remove-bg,)
 
@@ -77,6 +78,7 @@ help:
 	@echo "  make run [IMAGE=..] [RES=N] [TEX=0|1] [TEXRES=N] [OUT=..] [MODEL=..]"
 	@echo "    IMAGE  input image           (default: $(IMAGE))"
 	@echo "    RES    marching-cubes res     (default: $(RES); try 64/128/256/512)"
+	@echo "    FG     foreground ratio       (default: $(FG); object size in frame, (0,1])"
 	@echo "    TEX    bake UV texture        (1 = textured, 0 = vertex colors; default 0)"
 	@echo "    TEXRES texture atlas size     (default: $(TEXRES); only with TEX=1)"
 	@echo "    BG     remove background      (1 = U2Net segment, 0 = use alpha as-is; default 0)"
@@ -124,8 +126,8 @@ debug: clean $(TARGET)
 # =============================================================================
 run:
 	@test -x ./$(TARGET) || $(MAKE) blas
-	@echo "lrmc infer: model=$(MODEL) image=$(IMAGE) res=$(RES) tex=$(TEX) bg=$(BG) out=$(OUT)"
-	./$(TARGET) infer $(MODEL) $(IMAGE) -o $(OUT) --mc-resolution $(RES) $(TEX_FLAGS) $(BG_FLAGS)
+	@echo "lrmc infer: model=$(MODEL) image=$(IMAGE) res=$(RES) fg=$(FG) tex=$(TEX) bg=$(BG) out=$(OUT)"
+	./$(TARGET) infer $(MODEL) $(IMAGE) -o $(OUT) --mc-resolution $(RES) --foreground-ratio $(FG) $(TEX_FLAGS) $(BG_FLAGS)
 	@if [ -x triposr_env/.venv/bin/python ]; then \
 	    echo ""; echo "Inspecting $(OUT):"; \
 	    triposr_env/.venv/bin/python debug/debug_mesh.py $(OUT); \

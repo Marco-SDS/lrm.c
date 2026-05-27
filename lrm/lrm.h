@@ -64,9 +64,16 @@ typedef struct {
     /* Texture atlas resolution when bake_texture != 0. Default 2048.
      * Memory: tex_res^2 * 4 bytes + small scratch. */
     int   texture_resolution;
+
+    /* Fraction of the (square) canvas the foreground occupies during
+     * preprocessing. TripoSR default 0.85. Lower values shrink the object
+     * (more context, less detail); higher values zoom in (more detail, risk
+     * of silhouette clipping). Sweeping this is the single most effective
+     * input-quality knob per the TripoSR demo. Valid range (0, 1]. */
+    float foreground_ratio;
 } lrm_infer_opts;
 
-#define LRM_INFER_OPTS_DEFAULT { 256, 25.0f, 0.87f, 0, 2048 }
+#define LRM_INFER_OPTS_DEFAULT { 256, 25.0f, 0.87f, 0, 2048, 0.85f }
 
 /* ========================================================================
  * Lifecycle

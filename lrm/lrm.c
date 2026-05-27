@@ -181,7 +181,7 @@ lrm_mesh *lrm_infer(lrm_model *m, const iris_image *im,
         iris_set_error("lrm_infer: oom for preprocessed image");
         return NULL;
     }
-    if (lrm_triposr_preprocess(m, im, img_chw) != 0) {
+    if (lrm_triposr_preprocess(m, im, opts->foreground_ratio, img_chw) != 0) {
         free(img_chw);
         return NULL;
     }

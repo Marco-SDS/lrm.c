@@ -39,6 +39,8 @@ static void print_help(void) {
     printf("        Run end-to-end TripoSR inference. Options:\n");
     printf("          --mc-resolution       N    (default 256)\n");
     printf("          --threshold           V    (default 25.0)\n");
+    printf("          --foreground-ratio    V    (default 0.85; object size in frame,\n");
+    printf("                                     in (0,1]; sweep 0.8/0.85/0.9/0.95)\n");
     printf("          --remove-bg                segment foreground with U2Net (for\n");
     printf("                                     photos without an alpha mask)\n");
     printf("          --bg-model            P    (default <model_dir>/u2net.safetensors)\n");
@@ -126,6 +128,7 @@ static int cmd_infer(int argc, char **argv) {
     const char *output     = NULL;
     int   mc_resolution = 256;
     float threshold     = 25.0f;
+    float foreground_ratio = 0.85f;
     int   bake_texture  = 0;
     int   texture_resolution = 2048;
     int   remove_bg     = 0;
@@ -154,6 +157,14 @@ static int cmd_infer(int argc, char **argv) {
             threshold = parse_float(argv[++i]);
             if (threshold <= 0.0f) {
                 fprintf(stderr, "lrmc: --threshold must be > 0\n"); return 2;
+            }
+        } else if (strcmp(a, "--foreground-ratio") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "lrmc: --foreground-ratio requires a value\n"); return 2;
+            }
+            foreground_ratio = parse_float(argv[++i]);
+            if (foreground_ratio <= 0.0f || foreground_ratio > 1.0f) {
+                fprintf(stderr, "lrmc: --foreground-ratio must be in (0, 1]\n"); return 2;
             }
         } else if (strcmp(a, "--remove-bg") == 0) {
             remove_bg = 1;
@@ -194,8 +205,8 @@ static int cmd_infer(int argc, char **argv) {
 
     fprintf(stderr, "lrmc: model=%s\n", model_dir);
     fprintf(stderr, "lrmc: image=%s\n", image_path);
-    fprintf(stderr, "lrmc: output=%s  mc_res=%d  threshold=%.2f%s\n",
-            output, mc_resolution, threshold,
+    fprintf(stderr, "lrmc: output=%s  mc_res=%d  threshold=%.2f  fg_ratio=%.2f%s\n",
+            output, mc_resolution, threshold, foreground_ratio,
             bake_texture ? "  --bake-texture" : "");
     if (bake_texture) {
         fprintf(stderr, "lrmc: texture_resolution=%d\n", texture_resolution);
@@ -247,6 +258,7 @@ static int cmd_infer(int argc, char **argv) {
     opts.density_threshold = threshold;
     opts.bake_texture      = bake_texture;
     opts.texture_resolution = texture_resolution;
+    opts.foreground_ratio  = foreground_ratio;
     lrm_mesh *mesh = lrm_infer(m, im, &opts);
     double t_infer = clock_ms();
     if (mesh == NULL) {
