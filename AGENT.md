@@ -16,10 +16,18 @@ Single end-to-end command:
 ./lrmc infer <model_dir> <image> -o <output.glb> [--mc-resolution N]
 ```
 
-produces a binary glTF 2.0 file with PBR material, vertex normals, and
-vertex colors. The pipeline is image → DINO ViT-B/16 → 16-block triplane
-decoder → ConvTranspose upsample → density grid (sample + NeRF MLP) →
-marching cubes → color re-query → GLB.
+produces a binary glTF 2.0 file with PBR material, analytic gradient
+normals, and vertex colors. The pipeline is image → DINO ViT-B/16 →
+16-block triplane decoder → ConvTranspose upsample → coarse-to-fine
+density grid (sample + NeRF MLP) → marching cubes → floater removal →
+gradient normals → color re-query → GLB.
+
+Mesh/quality post-processing (Phases 19-20): the density grid is built
+coarse-to-fine (lrm_density.c) — bit-identical surface, ~12× faster at
+256³; disconnected floater components are dropped (union-find); per-vertex
+normals are the normalized negated density gradient (smooth shading, no
+geometry change); and the marching-cubes winding is corrected to canonical
+CCW-outward.
 
 All pipeline stages are validated stage-by-stage against the canonical
 PyTorch reference (see `tests/` and the per-stage commit messages on
@@ -104,17 +112,21 @@ make test-glb       - GLB writer structural + trimesh round-trip
 make test-e2e       - end-to-end TripoSR inference (~50 s on i9 CPU)
 ```
 
-# Performance baseline (Phase 14, 2026-05-22)
+# Performance baseline (Phase 19-20, 2026-05-27)
 
 On Intel i9-9880H + Accelerate (BLAS), end-to-end TripoSR inference on
 the canonical robot.png golden image:
 
-- 64³ MC resolution:  ~50 s total (decoder ~47 s = 93 %)
-- 256³ MC resolution: ~83 s total (decoder ~50 s + density ~30 s)
+- 64³ MC resolution:  ~50 s total (decoder ~44 s = ~90 %)
+- 256³ MC resolution: ~50 s total (decoder ~44 s = 88 %, density ~2.5 s)
 
-The triplane decoder is BLAS-bandwidth-bound at ~22 GFLOPS sustained.
-Closing the gap to the LRMengine.md §11 targets (3 s on M3 + Metal)
-requires Phase 13.
+The 256³ total dropped from ~83 s to ~50 s in Phase 19: coarse-to-fine
+density evaluation (lrm_density.c) cut the density stage from ~30 s to
+~2.5 s (~12×) with a bit-identical surface. The triplane decoder is now
+~88 % of the total and is BLAS-bandwidth-bound at ~22 GFLOPS sustained;
+closing the gap to the LRMengine.md §11 targets (3 s on M3 + Metal)
+requires Phase 13. Phase 20's quality stages (floater removal, gradient
+normals) add <20 ms combined.
 
 See [SPEED.md](SPEED.md) for the full per-stage breakdown.
 

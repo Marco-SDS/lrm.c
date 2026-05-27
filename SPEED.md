@@ -17,8 +17,9 @@ prints walltime per pipeline stage to stderr.
 
 ## Baseline: Intel macOS + Accelerate (i9-9880H @ 2.3 GHz, 8 cores)
 
-This is the only CPU we have on hand; numbers below are measured on
-2026-05-22 with commit `7778c79` (Phase 12 + Phase 14 timing).
+This is the only CPU we have on hand. The 64³ table is from 2026-05-22
+(Phase 12/14); the 256³ table was re-measured on 2026-05-27 after Phase 19
+(coarse-to-fine density) and Phase 20 (floater removal + gradient normals).
 
 ### Resolution 64³ (262,144 MC queries, 4,520 vertices output)
 
@@ -34,21 +35,30 @@ This is the only CPU we have on hand; numbers below are measured on
 | GLB write                              |    1 ms |     0.0 % |
 | **Total**                              | **50.4 s** |  **100 %** |
 
-### Resolution 256³ (16,777,216 MC queries, 75,918 vertices output)
+### Resolution 256³ (coarse-to-fine density, ~75,600 vertices output)
+
+Since Phase 19 the density grid is built coarse-to-fine (see below), so
+only ~6 % of the 16.78M grid nodes are evaluated through sample+MLP. Phase
+20 adds floater removal + analytic gradient normals, both negligible.
 
 | Stage                                  |    Time | % of total |
 |----------------------------------------|--------:|-----------:|
-| Preprocess                             |     7 ms |     0.0 % |
-| DINO ViT-B/16 encoder                  |  2,693 ms |     3.2 % |
-| Triplane decoder                       | 49,721 ms |    59.7 % |
-| Post-processor                         |     5 ms |     0.0 % |
-| Density grid (16.78M sample+MLP)       | 30,479 ms |    36.6 % |
-| Marching cubes                         |    201 ms |     0.2 % |
-| Vertex color re-query (75,918 verts)   |    150 ms |     0.2 % |
-| GLB write                              |     3 ms |     0.0 % |
-| **Total**                              |  **83.3 s** |  **100 %** |
+| Preprocess                             |     8 ms |     0.0 % |
+| DINO ViT-B/16 encoder                  |  2,760 ms |     5.6 % |
+| Triplane decoder                       | 43,700 ms |    88.3 % |
+| Post-processor                         |     6 ms |     0.0 % |
+| Density grid (coarse-to-fine, 5.9%)    |  2,510 ms |     5.1 % |
+| Marching cubes                         |    238 ms |     0.5 % |
+| Floater removal (union-find)           |      7 ms |     0.0 % |
+| Gradient normals                       |     10 ms |     0.0 % |
+| Vertex color re-query (75,630 verts)   |    125 ms |     0.3 % |
+| GLB write                              |     5 ms |     0.0 % |
+| **Total**                              |  **49.5 s** |  **100 %** |
 
-GLB output sizes: 181 KB at 64³, 3.9 MB at 256³.
+Before Phase 19 the dense density grid took **30.5 s** here (36.6 % of an
+83.3 s total); coarse-to-fine cut it to **2.5 s** (~12×) with a
+bit-identical marching-cubes surface, dropping the e2e total from 83.3 s to
+49.5 s on the same machine. GLB output sizes: 181 KB at 64³, ~3.9 MB at 256³.
 
 ## Where the time goes
 
@@ -65,17 +75,27 @@ benchmark machine, putting the theoretical decoder floor at
 ~50 s — and that's where we are. The decoder is essentially
 **at BLAS bandwidth limit on this hardware**.
 
-### Density grid scales linearly with MC res³
+### Density grid: coarse-to-fine (Phase 19)
 
-The cost is `mc_res³` × (one bilinear grid_sample + one tiny NeRF MLP
-forward) per query. At 64³ this is 520 ms; at 256³ it's 30.5 s, almost
-exactly 64× as expected.
+The marching-cubes isosurface is a thin 2D shell, and the TripoSR density
+field is band-limited at the triplane resolution (64×64 per plane), so it
+carries no detail finer than ~R/64 voxels. `lrm_density_build_sparse`
+exploits both facts: it evaluates a coarse ~64³ lattice, marks only the
+blocks straddling the iso-threshold (plus a 1-block dilation and a relative
+band for the steep `exp()` activation), exactly evaluates just those, and
+trilinearly fills the rest. Every cell that can contain the surface lies in
+an exactly-evaluated block, so the extracted mesh is **bit-identical** to a
+dense evaluation (verified by `make test-density-sparse`).
 
-The kernel hot path is `iris_grid_sample_bilinear` (CPU loops, not
-BLAS) plus the 10 BLAS sgemms inside the NeRF MLP. The MLP is small
-(120 → 64 → 4) so the GEMM aspect ratio is poor for cache reuse;
-this is also where a tiled / parallel Metal implementation would
-make the biggest delta.
+At 256³ this evaluates 5.9 % of the 16.78M nodes — 30.5 s → 2.5 s (~12×).
+At 64³ the block stride degenerates to 1 (coarse = full grid), so it
+matches the dense cost (~520 ms); that's fine since the density stage is
+~1 % of the 64³ total. The win scales with resolution, which is exactly
+where dense evaluation hurt.
+
+The per-query hot path is still `iris_grid_sample_bilinear` (CPU loops,
+not BLAS) plus the 10 small BLAS sgemms inside the NeRF MLP; coarse-to-fine
+simply runs ~16× fewer of them at 256³.
 
 ### Everything else is in the noise
 
@@ -90,8 +110,8 @@ on CPU.
 | Stage                       | LRMengine target            | Measured                  | Status |
 |-----------------------------|-----------------------------|---------------------------|--------|
 | Cold start (exec → ready)   | < 1.0 s (M3 Pro, Metal)     | 0.05 s model load on CPU  | ✅ trivially met |
-| End-to-end 512×512          | < 3.0 s (M3 Pro, Metal)     | 50-83 s (i9-9880H, CPU)   | ❌ requires Phase 13 |
-| End-to-end 512×512          | < 8.0 s (i7-12700, OpenBLAS)| ~50 s on slower i9 (CPU)  | ❌ likely ~25-30 s on i7-12700 |
+| End-to-end 512×512          | < 3.0 s (M3 Pro, Metal)     | 49-50 s (i9-9880H, CPU)   | ❌ requires Phase 13 |
+| End-to-end 512×512          | < 8.0 s (i7-12700, OpenBLAS)| ~50 s on slower i9 (CPU)  | ❌ likely ~22-25 s on i7-12700 |
 | Peak RSS                    | < 4 GB                       | ~2.0 GB at 256³           | ✅ |
 | Binary size, stripped       | < 5 MB                       | ~210 KB                   | ✅ ~25× headroom |
 
@@ -103,29 +123,29 @@ MLP) on Apple Silicon, or roughly 2-3× more memory bandwidth on x86.
 
 ## What would move the needle
 
-Ranked by expected impact at 256³:
+Ranked by expected impact at 256³ (the decoder is now ~88 % of the total
+after the density stage was collapsed in Phase 19):
 
 1. **Metal sgemm for decoder Q/K/V/GEGLU** (Phase 13). At ~5-10× the
    sustained GFLOPS of Accelerate sgemm, this collapses the decoder
    to ~5-10 s and would close most of the gap to the 3 s M3 target.
-2. **Tiled Metal compute for `iris_grid_sample_bilinear` + NeRF MLP
-   over the MC grid** (Phase 13). At 256³ this is 30 s; a tiled GPU
-   pass with early-termination on near-zero density values should
-   get it under 5 s.
-3. **Bigger BLAS** (e.g. OpenBLAS multi-threaded on x86). Each
+   With density already cheap, this is now the *only* large lever left.
+2. **Bigger BLAS** (e.g. OpenBLAS multi-threaded on x86). Each
    sgemm in the decoder is large enough to scale with cores; on
    an 8-core desktop OpenBLAS this would cut the decoder roughly
-   in half (from ~50 s to ~25-30 s on i7-12700).
-4. **bf16 weight cache** for the decoder. Reduces bandwidth pressure
+   in half (from ~44 s to ~22-25 s on i7-12700).
+3. **bf16 weight cache** for the decoder. Reduces bandwidth pressure
    by 2× without changing parity (already pattern-validated in the
    inherited iris.c kernels). Modest win on CPU, larger win on
    memory-bound GPUs.
-5. **Early-termination on low-density voxels for MC**. Skipping the
-   ~50-70 % of voxels that are clearly empty would cut the density
-   grid roughly proportionally. Heuristic and easy to add but only
-   matters at 256³ (where the density grid is 37 % of total time).
+4. **Tiled Metal compute for `iris_grid_sample_bilinear` + NeRF MLP**
+   (Phase 13). Now only ~2.5 s on CPU after coarse-to-fine, so this
+   is no longer urgent, but a GPU pass would still help at 512³.
 
-Anything beyond these is in the noise.
+DONE — **coarse-to-fine density (Phase 19)**. This was previously listed
+here as "early-termination on low-density voxels"; it landed as a
+band-limited octree-style refinement and cut the 256³ density stage from
+30.5 s to 2.5 s. Anything beyond the items above is in the noise.
 
 ## Repro
 

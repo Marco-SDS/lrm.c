@@ -514,12 +514,15 @@ Each phase ends with a concrete, verifiable artifact and a passing test
 | **15** | OpenLRM (optional) | Second model `lrm/lrm_openlrm.c`, validates the abstraction | OpenLRM golden parity | 1.5 wk | 📋 not started |
 | **16** | Background removal in C | Vendor a small segmentation model (candidates: RMBG-1.4, IS-Net, U2NetP — research phase first). Reuse existing kernels (conv2d, LN, GELU) | `lrm infer --auto-bg` matches a manually pre-processed reference | **3–6 wk** | 📋 not started |
 | **17** | Hardening + release | `README.md`, `SPEED.md`, `docs/ARCHITECTURE.md`, `docs/CONTRIBUTING.md`, perf table, signed binaries, GitHub release | tagged release | 2 wk | 🟡 docs done; signed CI + tagged release pending |
-| **18** | Texture baking (proposed) | UV unwrap + texture atlas rasterization + per-pixel NeRF MLP query; emit `baseColorTexture` in the GLB. Replaces the `--bake-texture` path of `run.py` | textured GLB round-trips through Blender with the baked atlas | 1–2 wk | 📋 not started |
+| **18** | Texture baking | UV atlas rasterization (per-triangle grid, no xatlas/OpenGL) + per-texel NeRF MLP query; emit `baseColorTexture` in the GLB. `--bake-texture` / `--texture-resolution` flags | textured GLB round-trips through Blender with the baked atlas | 1–2 wk | ✅ |
+| **19** | Coarse-to-fine density | `lrm/lrm_density.c`: band-limited octree-style refinement of the MC density grid — coarse ~64³ lattice + active-block refinement + trilinear fill. Subsumes the "early-termination" idea from Phase 13 on the CPU | sparse vs dense MC surface bit-identical at 128³/256³ (`make test-density-sparse`) | 3 d | ✅ (256³ density 30.5 s → 2.5 s, ~12×) |
+| **20** | Mesh quality post-processing | Analytic density-gradient normals (smooth shading, no geometry change), connected-component floater removal (union-find), and canonical CCW-outward winding fix | gradient normals unit + outward (flux > 0); synthetic floater test; e2e renders correctly | 3 d | ✅ |
 
-**MVP delivered**: Phases 1–12, 12.5, 14 complete. The end-to-end
-pipeline produces a viewer-ready PBR GLB from a single image at the
-expected quality (Chamfer ≈ 0 vs reference); see SPEED.md for the
-walltime baseline.
+**MVP delivered**: Phases 1–12, 12.5, 14, 17 (docs), 18, 19, 20 complete.
+The end-to-end pipeline produces a viewer-ready PBR GLB from a single image
+at the expected quality (Chamfer ≈ 0 vs reference), with smooth gradient
+normals, floater cleanup, and a 256³ total of ~50 s (down from ~83 s); see
+SPEED.md for the walltime baseline.
 
 **Open work**: Phase 13 (Metal acceleration; needs Apple Silicon),
 Phase 15 (OpenLRM as the architecture validator), Phase 16 (in-C
