@@ -28,14 +28,25 @@ binary glTF with PBR material, vertex normals, and vertex colors.
 
 **Walltime end-to-end** (Intel i9-9880H + Accelerate, see [SPEED.md](SPEED.md)):
 
-| MC resolution | total | vertices | output GLB |
-|---|---:|---:|---:|
-| 64³ (golden)  | ~50 s | ~4,500   | ~180 KB |
-| 256³ (prod)   | ~83 s | ~76,000  | ~3.9 MB |
+| MC resolution | total | vertices | output GLB | peak RSS |
+|---|---:|---:|---:|---:|
+| 64³ (golden)  | ~50 s | ~4,500   | ~180 KB | ~1.8 GB |
+| 256³ (prod)   | ~50 s | ~76,000  | ~3.9 MB | ~2.0 GB |
+| 512³ (hi-fi)  | ~70 s | ~306,000 | ~15 MB  | ~4.0 GB |
 
-The triplane decoder is the bottleneck (~50 s on this hardware,
-at Accelerate sgemm bandwidth limit). Apple Silicon Metal kernels
-(Phase 13) target ~3 s end-to-end at 256³.
+Since the coarse-to-fine density rebuild the density stage is no longer
+resolution-bound: 256³ dropped from ~83 s to ~50 s, and 512³ is now
+practical (~70 s) where a dense evaluation would take ~6 min. The triplane
+decoder is now the sole bottleneck (~44 s on this hardware, at Accelerate
+sgemm bandwidth limit); Apple Silicon Metal kernels (Phase 13) target ~3 s.
+
+**On resolution and quality:** the TripoSR density field is band-limited at
+the triplane resolution (64²), so higher MC resolution yields a *smoother,
+denser* mesh (finer silhouette, less stair-stepping) rather than genuinely
+new geometric detail. 256³ + the analytic gradient normals is the sweet
+spot for most uses; 512³ is for high-fidelity geometry exports. Texture
+baking (`--bake-texture`) suits lower poly counts (64–128³), where each
+triangle gets many atlas texels.
 
 ## Quick start
 

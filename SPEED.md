@@ -60,6 +60,42 @@ Before Phase 19 the dense density grid took **30.5 s** here (36.6 % of an
 bit-identical marching-cubes surface, dropping the e2e total from 83.3 s to
 49.5 s on the same machine. GLB output sizes: 181 KB at 64³, ~3.9 MB at 256³.
 
+### Resolution 512³ (hi-fi, ~306,000 vertices output)
+
+Coarse-to-fine is what makes 512³ practical at all: a dense evaluation
+would be 134M sample+MLP queries (~6 min just for density), whereas the
+sparse path evaluates 5.8 % of them.
+
+| Stage                                  |    Time | % of total |
+|----------------------------------------|--------:|-----------:|
+| Preprocess                             |     8 ms |     0.0 % |
+| DINO ViT-B/16 encoder                  |  2,587 ms |     3.9 % |
+| Triplane decoder                       | 44,644 ms |    67.0 % |
+| Post-processor                         |     6 ms |     0.0 % |
+| Density grid (coarse-to-fine, 5.8%)    | 16,866 ms |    25.3 % |
+| Marching cubes                         |  1,657 ms |     2.5 % |
+| Floater removal (union-find)           |     42 ms |     0.1 % |
+| Gradient normals                       |     86 ms |     0.1 % |
+| Vertex color re-query (306,454 verts)  |    599 ms |     0.9 % |
+| GLB write                              |     ~5 ms |     0.0 % |
+| **Total**                              |  **66.6 s** |  **100 %** |
+
+Peak RSS ~4.0 GB — dominated by the marching-cubes edge-dedup table
+(3·512³ ints = 1.6 GB) plus the density grid (0.5 GB) and the mmap'd
+model (1.7 GB). This is right at the LRMengine.md §11 4 GB target; a hash
+map for the edge table would cut it sharply but isn't needed within 16 GB.
+GLB output ~15 MB.
+
+**Is 512³ "higher quality"?** Only in tessellation, not detail. The TripoSR
+density field is band-limited at the triplane resolution (64² per plane):
+at 256³ each triplane texel spans ~4 voxels, at 512³ ~8. So 512³ samples the
+*same* smooth field more finely — a smoother silhouette and less MC
+stair-stepping — but adds no geometric detail the model doesn't encode.
+With the Phase 20 gradient normals already smoothing the shading at 256³,
+the marginal visual gain at 512³ is modest and costs 4× the triangles, 4×
+the file, and ~35 % more walltime. Recommendation: 256³ for general use,
+512³ for high-fidelity geometry exports.
+
 ## Where the time goes
 
 ### Triplane decoder dominates (60-93%)
