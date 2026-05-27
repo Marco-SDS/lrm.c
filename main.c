@@ -16,6 +16,7 @@
 #include "iris.h"
 #include "lrm/lrm.h"
 #include "lrm/lrm_triposr.h"
+#include "lrm/lrm_u2net.h"
 
 static void print_version(void) {
     printf("lrm.c (fork of iris.c)\n");
@@ -38,6 +39,9 @@ static void print_help(void) {
     printf("        Run end-to-end TripoSR inference. Options:\n");
     printf("          --mc-resolution       N    (default 256)\n");
     printf("          --threshold           V    (default 25.0)\n");
+    printf("          --remove-bg                segment foreground with U2Net (for\n");
+    printf("                                     photos without an alpha mask)\n");
+    printf("          --bg-model            P    (default <model_dir>/u2net.safetensors)\n");
     printf("          --bake-texture             emit UV atlas + PNG texture\n");
     printf("          --texture-resolution  N    (default 2048; only with --bake-texture)\n");
     printf("\n");
@@ -79,6 +83,43 @@ static double clock_ms(void) {
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
 }
 
+/* Run U2Net background removal on `im` and return a new RGBA image whose
+ * alpha is the soft foreground mask. `im` is left untouched (not freed).
+ * Returns NULL on error (message printed). */
+static iris_image *remove_background(const char *bg_model, const iris_image *im) {
+    lrm_u2net *bg = lrm_u2net_load(bg_model);
+    if (!bg) {
+        fprintf(stderr, "lrmc: bg model load failed: %s\n", iris_get_error());
+        return NULL;
+    }
+    const int W = im->width, H = im->height, C = im->channels;
+    float *alpha = (float *)malloc((size_t)W * H * sizeof(float));
+    iris_image *out = iris_image_create(W, H, 4);
+    if (!alpha || !out) {
+        free(alpha);
+        if (out) iris_image_free(out);
+        lrm_u2net_free(bg);
+        fprintf(stderr, "lrmc: out of memory in background removal\n");
+        return NULL;
+    }
+    if (lrm_u2net_alpha(bg, im->data, H, W, C, alpha) != 0) {
+        fprintf(stderr, "lrmc: %s\n", iris_get_error());
+        free(alpha); iris_image_free(out); lrm_u2net_free(bg);
+        return NULL;
+    }
+    lrm_u2net_free(bg);
+    const uint8_t *src = im->data;
+    for (int i = 0; i < W * H; i++) {
+        out->data[i * 4 + 0] = src[i * C + 0];
+        out->data[i * 4 + 1] = src[i * C + 1];
+        out->data[i * 4 + 2] = src[i * C + 2];
+        float a = alpha[i];
+        out->data[i * 4 + 3] = (uint8_t)(a * 255.0f + 0.5f);
+    }
+    free(alpha);
+    return out;
+}
+
 static int cmd_infer(int argc, char **argv) {
     const char *model_dir  = NULL;
     const char *image_path = NULL;
@@ -87,6 +128,8 @@ static int cmd_infer(int argc, char **argv) {
     float threshold     = 25.0f;
     int   bake_texture  = 0;
     int   texture_resolution = 2048;
+    int   remove_bg     = 0;
+    const char *bg_model = NULL;
     int   positional = 0;
 
     for (int i = 2; i < argc; i++) {
@@ -112,6 +155,13 @@ static int cmd_infer(int argc, char **argv) {
             if (threshold <= 0.0f) {
                 fprintf(stderr, "lrmc: --threshold must be > 0\n"); return 2;
             }
+        } else if (strcmp(a, "--remove-bg") == 0) {
+            remove_bg = 1;
+        } else if (strcmp(a, "--bg-model") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "lrmc: --bg-model requires a path\n"); return 2;
+            }
+            bg_model = argv[++i];
         } else if (strcmp(a, "--bake-texture") == 0) {
             bake_texture = 1;
         } else if (strcmp(a, "--texture-resolution") == 0) {
@@ -138,7 +188,7 @@ static int cmd_infer(int argc, char **argv) {
     if (!model_dir || !image_path || !output) {
         fprintf(stderr,
                 "usage: lrmc infer <model_dir> <image> -o <output.glb> "
-                "[--mc-resolution N] [--threshold V]\n");
+                "[--mc-resolution N] [--threshold V] [--remove-bg]\n");
         return 2;
     }
 
@@ -160,6 +210,27 @@ static int cmd_infer(int argc, char **argv) {
     }
     fprintf(stderr, "lrmc: loaded image %dx%d %dch\n",
             im->width, im->height, im->channels);
+
+    if (remove_bg) {
+        char bg_default[1024];
+        const char *bgm = bg_model;
+        if (!bgm) {
+            snprintf(bg_default, sizeof bg_default,
+                     "%s/u2net.safetensors", model_dir);
+            bgm = bg_default;
+        }
+        fprintf(stderr, "lrmc: removing background (u2net: %s)\n", bgm);
+        double t_bg = clock_ms();
+        iris_image *rgba = remove_background(bgm, im);
+        if (rgba == NULL) {
+            iris_image_free(im);
+            return 1;
+        }
+        iris_image_free(im);
+        im = rgba;
+        fprintf(stderr, "lrmc: background removed in %.0f ms (now %dx%d 4ch)\n",
+                clock_ms() - t_bg, im->width, im->height);
+    }
 
     double t_img = clock_ms();
     lrm_model *m = lrm_load(model_dir);
