@@ -1,12 +1,14 @@
 /*
- * lrm_bake_texture.c - per-triangle grid atlas + scanline rasterization.
+ * lrm_bake_texture.c - area-weighted per-triangle atlas + scanline raster.
  *
  * Algorithm:
- *   1. UV layout: pick S = ceil(sqrt(N_faces)). Texture splits into
- *      S x S cells, each cell_size = tex_res / S texels per side.
- *      Triangle i is placed in cell (i % S, i / S). Within the cell
- *      the 3 vertex UVs map to a right-triangle inscribed in the cell
- *      with a `padding` texel inset, so:
+ *   1. UV layout: each triangle gets its own square cell whose side is
+ *      proportional to sqrt(its 3D surface area), so texel density is roughly
+ *      uniform across the surface (large triangles are no longer
+ *      under-sampled). Cells are shelf-packed (next-fit decreasing); a binary
+ *      search on the area->side scale picks the largest cells that fit the
+ *      atlas (pack_faces). Within each cell the 3 vertex UVs map to a
+ *      right-triangle inscribed with a `padding` texel inset, so:
  *        v0 -> (cx*cs + p, (cy+1)*cs - 1 - p)     bottom-left
  *        v1 -> ((cx+1)*cs - 1 - p, (cy+1)*cs - 1 - p)   bottom-right
  *        v2 -> (cx*cs + p, cy*cs + p)             top-left
@@ -149,6 +151,103 @@ static int chunk_flush(chunk_t *c,
     return 0;
 }
 
+/* ---- Area-weighted atlas packing ------------------------------------- */
+/*
+ * Each triangle gets its own square cell, but the cell side is proportional
+ * to sqrt(triangle 3D area) instead of being uniform. This gives a roughly
+ * constant texel density per unit surface area, so large triangles are no
+ * longer under-sampled (blurry) while tiny ones waste texels. Cells are
+ * placed with shelf (next-fit-decreasing) packing; a binary search on the
+ * area->side scale picks the largest cells that still fit the atlas.
+ */
+typedef struct {
+    int *x, *y, *s;   /* per-face cell origin (texels) and side (texels) */
+} packing_t;
+
+static void packing_free(packing_t *p) {
+    free(p->x); free(p->y); free(p->s);
+    memset(p, 0, sizeof(*p));
+}
+
+typedef struct { int idx; float sa; } face_sa_t;
+static int cmp_sa_desc(const void *a, const void *b) {
+    float da = ((const face_sa_t *)a)->sa, db = ((const face_sa_t *)b)->sa;
+    return (da < db) - (da > db);   /* descending */
+}
+
+/* Shelf-pack cells sized side_i = max(min_side, k*sa + base). If `store`,
+ * record origins into pk->x/y; otherwise just test feasibility. Returns 1 if
+ * everything fits in W x H, else 0. */
+static int shelf_pack(const face_sa_t *ord, int n, float k, int base,
+                      int min_side, int W, int H, packing_t *pk, int store) {
+    int x = 0, y = 0, row_h = 0;
+    for (int t = 0; t < n; t++) {
+        int i = ord[t].idx;
+        int s = (int)(k * ord[t].sa) + base;
+        if (s < min_side) s = min_side;
+        if (s > W) return 0;
+        if (x + s > W) { y += row_h; x = 0; row_h = 0; }  /* next shelf */
+        if (y + s > H) return 0;
+        if (store) { pk->x[i] = x; pk->y[i] = y; pk->s[i] = s; }
+        x += s;
+        if (s > row_h) row_h = s;
+    }
+    return 1;
+}
+
+static int pack_faces(const float *vertices, int nv, const int32_t *faces,
+                      int nf, int W, int H, int pad, packing_t *pk) {
+    const int base = 2 * pad + 1;       /* padding both sides + 1 */
+    const int min_side = 2 * pad + 3;   /* leave >=2 usable texels */
+    face_sa_t *ord = (face_sa_t *)malloc((size_t)nf * sizeof(face_sa_t));
+    pk->x = (int *)malloc((size_t)nf * sizeof(int));
+    pk->y = (int *)malloc((size_t)nf * sizeof(int));
+    pk->s = (int *)malloc((size_t)nf * sizeof(int));
+    if (!ord || !pk->x || !pk->y || !pk->s) { free(ord); packing_free(pk); return -1; }
+
+    float max_sa = 0.0f;
+    for (int i = 0; i < nf; i++) {
+        int a = faces[i*3+0], b = faces[i*3+1], c = faces[i*3+2];
+        float sa = 0.0f;
+        if (a >= 0 && b >= 0 && c >= 0 && a < nv && b < nv && c < nv) {
+            const float *A = vertices + (size_t)a*3, *B = vertices + (size_t)b*3,
+                        *C = vertices + (size_t)c*3;
+            float e1x=B[0]-A[0], e1y=B[1]-A[1], e1z=B[2]-A[2];
+            float e2x=C[0]-A[0], e2y=C[1]-A[1], e2z=C[2]-A[2];
+            float cx=e1y*e2z-e1z*e2y, cy=e1z*e2x-e1x*e2z, cz=e1x*e2y-e1y*e2x;
+            sa = sqrtf(0.5f * sqrtf(cx*cx + cy*cy + cz*cz)); /* sqrt(area) */
+        }
+        ord[i].idx = i; ord[i].sa = sa;
+        if (sa > max_sa) max_sa = sa;
+    }
+    qsort(ord, nf, sizeof(face_sa_t), cmp_sa_desc);
+
+    /* Binary search the largest scale k for which the shelf pack fits. */
+    float lo = 0.0f, hi = (max_sa > 1e-9f) ? ((float)(W - base) / max_sa) : 1.0f;
+    if (hi < 0.0f) hi = 0.0f;
+    if (!shelf_pack(ord, nf, lo, base, min_side, W, H, pk, 0)) {
+        free(ord); packing_free(pk);
+        return set_err("lrm_bake_texture: too many faces (%d) for tex_res=%d",
+                       nf, W);   /* even minimum cells don't fit */
+    }
+    for (int it = 0; it < 40; it++) {
+        float mid = 0.5f * (lo + hi);
+        if (shelf_pack(ord, nf, mid, base, min_side, W, H, pk, 0)) lo = mid;
+        else hi = mid;
+    }
+    shelf_pack(ord, nf, lo, base, min_side, W, H, pk, 1);  /* final store */
+
+    if (getenv("LRM_TIMING")) {
+        long long used = 0;
+        for (int i = 0; i < nf; i++) used += (long long)pk->s[i] * pk->s[i];
+        fprintf(stderr, "lrmc:   (bake atlas: %d cells, scale=%.2f, "
+                "cell-square fill=%.1f%%)\n", nf, (double)lo,
+                100.0 * (double)used / ((double)W * H));
+    }
+    free(ord);
+    return 0;
+}
+
 /* ---- Main entry ------------------------------------------------------ */
 
 int lrm_bake_texture(const lrm_triplane_sample_cfg *ts_cfg,
@@ -181,15 +280,6 @@ int lrm_bake_texture(const lrm_triplane_sample_cfg *ts_cfg,
     const int H = cfg.texture_resolution;
     const int pad = cfg.padding;
 
-    /* Grid: S = ceil(sqrt(N)); cell_size = floor(W/S). */
-    int S = (int)ceilf(sqrtf((float)n_faces));
-    if (S < 1) S = 1;
-    int cell_size = W / S;
-    if (cell_size < 2 * pad + 4) {
-        return set_err("lrm_bake_texture: too many faces (%d) for tex_res=%d",
-                       n_faces, W);
-    }
-
     /* Allocate outputs. */
     uint8_t *tex = (uint8_t *)malloc((size_t)W * H * 4);
     if (!tex) return set_err("lrm_bake_texture: oom for texture buffer");
@@ -203,16 +293,22 @@ int lrm_bake_texture(const lrm_triplane_sample_cfg *ts_cfg,
     float *uvs = (float *)malloc((size_t)n_faces * 3 * 2 * sizeof(float));
     if (!uvs) { free(tex); return set_err("lrm_bake_texture: oom for UVs"); }
 
-    /* Compute per-face UVs (3 per face). */
+    /* Area-weighted atlas packing: cell side proportional to sqrt(3D area),
+     * shelf-packed (replaces the old uniform S x S grid). */
+    packing_t pk = {0};
+    if (pack_faces(vertices, n_vertices, faces, n_faces, W, H, pad, &pk) != 0) {
+        free(tex); free(uvs);
+        return -1;   /* error already set */
+    }
+
+    /* Compute per-face UVs (3 per face) from the packed cells. */
     const float inv_W = 1.0f / (float)W;
     const float inv_H = 1.0f / (float)H;
     for (int i = 0; i < n_faces; i++) {
-        int cx = i % S;
-        int cy = i / S;
-        int x0 = cx * cell_size + pad;                 /* left  */
-        int x1 = (cx + 1) * cell_size - 1 - pad;       /* right */
-        int y0 = cy * cell_size + pad;                 /* top   */
-        int y1 = (cy + 1) * cell_size - 1 - pad;       /* bottom*/
+        int x0 = pk.x[i] + pad;                  /* left  */
+        int x1 = pk.x[i] + pk.s[i] - 1 - pad;    /* right */
+        int y0 = pk.y[i] + pad;                  /* top   */
+        int y1 = pk.y[i] + pk.s[i] - 1 - pad;    /* bottom*/
         /* v0 = bottom-left, v1 = bottom-right, v2 = top-left
          * (texel positions in pixel space, with V going down). */
         float u_v0 = (float)x0 * inv_W, v_v0 = (float)y1 * inv_H;
@@ -228,18 +324,16 @@ int lrm_bake_texture(const lrm_triplane_sample_cfg *ts_cfg,
      * accumulate into the chunk batcher, flush as it fills. */
     chunk_t chunk;
     if (chunk_init(&chunk, cfg.chunk_size, ts_cfg, mlp) != 0) {
-        free(tex); free(uvs);
+        packing_free(&pk); free(tex); free(uvs);
         return set_err("lrm_bake_texture: oom for chunk scratch");
     }
 
     for (int fi = 0; fi < n_faces; fi++) {
         /* Texel-space vertex positions (the inscribed right triangle). */
-        int cx = fi % S;
-        int cy = fi / S;
-        int x0 = cx * cell_size + pad;
-        int x1 = (cx + 1) * cell_size - 1 - pad;
-        int y0 = cy * cell_size + pad;
-        int y1 = (cy + 1) * cell_size - 1 - pad;
+        int x0 = pk.x[fi] + pad;
+        int x1 = pk.x[fi] + pk.s[fi] - 1 - pad;
+        int y0 = pk.y[fi] + pad;
+        int y1 = pk.y[fi] + pk.s[fi] - 1 - pad;
         float p0x = (float)x0, p0y = (float)y1;  /* bottom-left  */
         float p1x = (float)x1, p1y = (float)y1;  /* bottom-right */
         float p2x = (float)x0, p2y = (float)y0;  /* top-left     */
@@ -283,7 +377,7 @@ int lrm_bake_texture(const lrm_triplane_sample_cfg *ts_cfg,
 
                 if (chunk.n == chunk.cap) {
                     if (chunk_flush(&chunk, ts_cfg, mlp, triplane, tex) != 0) {
-                        chunk_free(&chunk); free(tex); free(uvs);
+                        chunk_free(&chunk); packing_free(&pk); free(tex); free(uvs);
                         return -1;
                     }
                 }
@@ -296,11 +390,12 @@ int lrm_bake_texture(const lrm_triplane_sample_cfg *ts_cfg,
         }
     }
     if (chunk_flush(&chunk, ts_cfg, mlp, triplane, tex) != 0) {
-        chunk_free(&chunk); free(tex); free(uvs);
+        chunk_free(&chunk); packing_free(&pk); free(tex); free(uvs);
         return -1;
     }
 
     chunk_free(&chunk);
+    packing_free(&pk);
     *out_uvs = uvs;
     *out_tex_rgba = tex;
     return 0;
