@@ -405,7 +405,7 @@ int lrm_vit_dino_forward(const lrm_vit_dino *vit,
     iris_conv2d(patch_chw, normalized_img, vit->patch_embed_w, vit->patch_embed_b,
                 /*batch=*/1, /*in_ch=*/3, /*out_ch=*/hidden, H, W,
                 /*kH=*/vit->patch_size, /*kW=*/vit->patch_size,
-                /*stride=*/vit->patch_size, /*padding=*/0);
+                /*stride=*/vit->patch_size, /*padding=*/0, /*dilation=*/1);
 
     /* attn_out can be reused now. */
 

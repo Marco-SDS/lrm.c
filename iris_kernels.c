@@ -350,9 +350,10 @@ void iris_gpu_end_batch(void) {
  * the ViT patch embedding and any other Conv2D in the LRM pipeline. */
 void iris_conv2d(float *out, const float *in, const float *weight, const float *bias,
                  int batch, int in_ch, int out_ch, int H, int W,
-                 int kH, int kW, int stride, int padding) {
-    int outH = (H + 2 * padding - kH) / stride + 1;
-    int outW = (W + 2 * padding - kW) / stride + 1;
+                 int kH, int kW, int stride, int padding, int dilation) {
+    if (dilation < 1) dilation = 1;
+    int outH = (H + 2 * padding - dilation * (kH - 1) - 1) / stride + 1;
+    int outW = (W + 2 * padding - dilation * (kW - 1) - 1) / stride + 1;
 
 #ifdef USE_BLAS
     /* im2col + BLAS optimization with tiling for large convolutions */
@@ -392,8 +393,8 @@ void iris_conv2d(float *out, const float *in, const float *weight, const float *
                     for (int kw = 0; kw < kW; kw++) {
                         for (int oh = tile_start; oh < tile_end; oh++) {
                             for (int ow = 0; ow < outW; ow++) {
-                                int ih = oh * stride - padding + kh;
-                                int iw = ow * stride - padding + kw;
+                                int ih = oh * stride - padding + kh * dilation;
+                                int iw = ow * stride - padding + kw * dilation;
                                 int col_idx = col_row * tile_pixels + (oh - tile_start) * outW + ow;
                                 if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
                                     col[col_idx] = in_b[ic * H * W + ih * W + iw];
@@ -449,8 +450,8 @@ naive_fallback:
                     for (int ic = 0; ic < in_ch; ic++) {
                         for (int kh = 0; kh < kH; kh++) {
                             for (int kw = 0; kw < kW; kw++) {
-                                int ih = oh * stride - padding + kh;
-                                int iw = ow * stride - padding + kw;
+                                int ih = oh * stride - padding + kh * dilation;
+                                int iw = ow * stride - padding + kw * dilation;
 
                                 if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
                                     int in_idx = b * in_ch * H * W + ic * H * W + ih * W + iw;
@@ -467,6 +468,95 @@ naive_fallback:
             }
         }
     }
+}
+
+/* 2D max pooling, kernel k x k, given stride, no padding. With ceil_mode the
+ * output dim rounds up and the trailing partial window is reduced over only
+ * its in-bounds elements (PyTorch MaxPool2d(ceil_mode=True) semantics, as
+ * used by U2Net's downsampling). outH/outW are returned to the caller. */
+void iris_maxpool2d(float *out, const float *in,
+                    int batch, int channels, int H, int W,
+                    int k, int stride, int ceil_mode,
+                    int *outH, int *outW) {
+    int oH = (H - k) / stride + 1;
+    int oW = (W - k) / stride + 1;
+    if (ceil_mode) {
+        if ((H - k) % stride != 0) oH++;
+        if ((W - k) % stride != 0) oW++;
+    }
+    if (outH) *outH = oH;
+    if (outW) *outW = oW;
+    for (int b = 0; b < batch; b++) {
+        for (int c = 0; c < channels; c++) {
+            const float *in_c = in + ((size_t)b * channels + c) * H * W;
+            float *out_c = out + ((size_t)b * channels + c) * oH * oW;
+            for (int oh = 0; oh < oH; oh++) {
+                for (int ow = 0; ow < oW; ow++) {
+                    float m = -INFINITY;
+                    for (int kh = 0; kh < k; kh++) {
+                        int ih = oh * stride + kh;
+                        if (ih >= H) continue;
+                        for (int kw = 0; kw < k; kw++) {
+                            int iw = ow * stride + kw;
+                            if (iw >= W) continue;
+                            float v = in_c[ih * W + iw];
+                            if (v > m) m = v;
+                        }
+                    }
+                    out_c[oh * oW + ow] = m;
+                }
+            }
+        }
+    }
+}
+
+/* Bilinear upsample [batch, channels, inH, inW] -> [.., outH, outW] with
+ * align_corners=False (PyTorch F.interpolate default), edge-clamped. Matches
+ * U2Net's _upsample_like (F.upsample(mode='bilinear')). */
+void iris_upsample_bilinear(float *out, const float *in,
+                            int batch, int channels,
+                            int inH, int inW, int outH, int outW) {
+    float sh = (float)inH / (float)outH;
+    float sw = (float)inW / (float)outW;
+    for (int b = 0; b < batch; b++) {
+        for (int c = 0; c < channels; c++) {
+            const float *in_c = in + ((size_t)b * channels + c) * inH * inW;
+            float *out_c = out + ((size_t)b * channels + c) * outH * outW;
+            for (int oy = 0; oy < outH; oy++) {
+                float sy = ((float)oy + 0.5f) * sh - 0.5f;
+                int y0 = (int)floorf(sy);
+                float dy = sy - (float)y0;
+                int y1 = y0 + 1;
+                if (y0 < 0) y0 = 0; else if (y0 > inH - 1) y0 = inH - 1;
+                if (y1 < 0) y1 = 0; else if (y1 > inH - 1) y1 = inH - 1;
+                for (int ox = 0; ox < outW; ox++) {
+                    float sx = ((float)ox + 0.5f) * sw - 0.5f;
+                    int x0 = (int)floorf(sx);
+                    float dx = sx - (float)x0;
+                    int x1 = x0 + 1;
+                    if (x0 < 0) x0 = 0; else if (x0 > inW - 1) x0 = inW - 1;
+                    if (x1 < 0) x1 = 0; else if (x1 > inW - 1) x1 = inW - 1;
+                    float v00 = in_c[y0 * inW + x0];
+                    float v01 = in_c[y0 * inW + x1];
+                    float v10 = in_c[y1 * inW + x0];
+                    float v11 = in_c[y1 * inW + x1];
+                    float top = v00 + dx * (v01 - v00);
+                    float bot = v10 + dx * (v11 - v10);
+                    out_c[oy * outW + ox] = top + dy * (bot - top);
+                }
+            }
+        }
+    }
+}
+
+/* In-place ReLU. */
+void iris_relu(float *x, int n) {
+    for (int i = 0; i < n; i++) if (x[i] < 0.0f) x[i] = 0.0f;
+}
+
+/* In-place logistic sigmoid. */
+void iris_sigmoid(float *x, int n) {
+    for (int i = 0; i < n; i++) x[i] = 1.0f / (1.0f + expf(-x[i]));
 }
 
 /* ========================================================================

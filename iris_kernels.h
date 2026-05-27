@@ -112,10 +112,39 @@ void iris_gpu_end_batch(void);
  * weight: [out_ch, in_ch, kH, kW]
  * bias: [out_ch] (can be NULL)
  * out: [batch, out_ch, outH, outW]
+ * dilation: atrous spacing between kernel taps (1 = standard conv). The output
+ *           size is (H + 2*padding - dilation*(kH-1) - 1)/stride + 1.
  */
 void iris_conv2d(float *out, const float *in, const float *weight, const float *bias,
                  int batch, int in_ch, int out_ch, int H, int W,
-                 int kH, int kW, int stride, int padding);
+                 int kH, int kW, int stride, int padding, int dilation);
+
+/*
+ * 2D max pooling (k x k, given stride, no padding). With ceil_mode != 0 the
+ * output dims round up and the trailing partial window pools over only its
+ * in-bounds elements (PyTorch MaxPool2d(ceil_mode=True)). The output dims are
+ * written to *outH / *outW (either may be NULL).
+ * in/out: [batch, channels, H, W] / [batch, channels, outH, outW]
+ */
+void iris_maxpool2d(float *out, const float *in,
+                    int batch, int channels, int H, int W,
+                    int k, int stride, int ceil_mode,
+                    int *outH, int *outW);
+
+/*
+ * Bilinear upsample to an arbitrary target size, align_corners=False
+ * (PyTorch F.interpolate default), edge-clamped.
+ * in: [batch, channels, inH, inW]  out: [batch, channels, outH, outW]
+ */
+void iris_upsample_bilinear(float *out, const float *in,
+                            int batch, int channels,
+                            int inH, int inW, int outH, int outW);
+
+/* In-place ReLU: x = max(0, x). */
+void iris_relu(float *x, int n);
+
+/* In-place logistic sigmoid: x = 1/(1+exp(-x)). */
+void iris_sigmoid(float *x, int n);
 
 /* ========================================================================
  * Normalization
