@@ -74,7 +74,7 @@ activation function):
    states the input/output shapes and the PyTorch op it mirrors.
 2. Add the implementation to `iris_kernels.c` next to peer kernels
    (activations grouped together, etc.).
-3. Add a parity test to `tests/test_kernels.c`:
+3. Add a parity test to `tests/model/test_kernels.c`:
    - Generate the reference output in PyTorch (a small Python helper
      in the test docstring) and embed the result as
      `static const float ref_<name>[...]`.
@@ -118,10 +118,10 @@ in `lrm/`. Walk-through:
    lrm_kind { LRM_KIND_TRIPOSR, LRM_KIND_<MODELNAME> }`. Update
    `lrm_load` and `lrm_free` in `lrm/lrm.c` to dispatch on it. The
    `lrm_infer` entry point also dispatches.
-6. **Per-module parity tests**: add `tests/test_<modelname>_*.c` for
-   each sub-stage that differs from TripoSR. Re-use the test
-   structure (mmap goldens, run forward, compare with the same
-   helper).
+6. **Per-module parity tests**: add `tests/model/test_<modelname>_*.c`
+   for each sub-stage that differs from TripoSR (mesh-construction
+   tests go under `tests/geometry/`). Re-use the test structure
+   (mmap goldens, run forward, compare with the same helper).
 7. **End-to-end test**: extend `make test-e2e` (or add
    `make test-e2e-<modelname>`) to run the full pipeline at low
    resolution.

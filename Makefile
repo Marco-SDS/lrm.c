@@ -34,7 +34,7 @@ LIB        = liblrmc.a
 
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info pngtest test test-dino test-decoder test-upsample test-density test-density-sparse test-mc test-glb test-e2e test-e2e-tex help generic blas mps
+.PHONY: all clean debug lib install info test test-dino test-decoder test-upsample test-density test-density-sparse test-mc test-glb test-e2e test-e2e-tex help generic blas mps
 .NOTPARALLEL: mps
 
 # Default: show available targets
@@ -63,7 +63,6 @@ endif
 	@echo "  make test-glb      - Build and run the GLB writer structural test"
 	@echo "  make test-e2e      - End-to-end TripoSR inference at 64^3 (~50 s on Intel macOS CPU)"
 	@echo "  make test-e2e-tex  - Textured end-to-end at 64^3 with 1024^2 UV atlas"
-	@echo "  make pngtest       - Run the PNG codec comparison test"
 	@echo "  make info     - Show build configuration"
 	@echo "  make lib      - Build static library ($(LIB))"
 	@echo ""
@@ -154,7 +153,7 @@ debug: clean $(TARGET)
 # =============================================================================
 test:
 	@echo "Building kernel parity tests..."
-	@$(CC) $(CFLAGS_BASE) tests/test_kernels.c iris_kernels.c \
+	@$(CC) $(CFLAGS_BASE) tests/model/test_kernels.c iris_kernels.c \
 	    -lm -o /tmp/lrm_test_kernels
 	@/tmp/lrm_test_kernels
 	@rm -f /tmp/lrm_test_kernels
@@ -162,7 +161,7 @@ test:
 test-dino:
 	@echo "Building DINO ViT-B/16 parity test..."
 	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
-	    tests/test_vit_dino.c lrm/lrm_vit_dino.c \
+	    tests/model/test_vit_dino.c lrm/lrm_vit_dino.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
 	    -framework Accelerate -lm -o /tmp/lrm_test_dino
 	@/tmp/lrm_test_dino
@@ -171,7 +170,7 @@ test-dino:
 test-decoder:
 	@echo "Building triplane decoder parity test..."
 	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
-	    tests/test_triplane_decoder.c lrm/lrm_triplane_decoder.c \
+	    tests/model/test_triplane_decoder.c lrm/lrm_triplane_decoder.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
 	    -framework Accelerate -lm -o /tmp/lrm_test_decoder
 	@/tmp/lrm_test_decoder
@@ -180,7 +179,7 @@ test-decoder:
 test-upsample:
 	@echo "Building triplane upsample parity test..."
 	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
-	    tests/test_triplane_upsample.c lrm/lrm_triplane_upsample.c \
+	    tests/model/test_triplane_upsample.c lrm/lrm_triplane_upsample.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
 	    -framework Accelerate -lm -o /tmp/lrm_test_upsample
 	@/tmp/lrm_test_upsample
@@ -189,7 +188,7 @@ test-upsample:
 test-density:
 	@echo "Building triplane-sample + NeRF MLP parity test..."
 	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
-	    tests/test_density_64.c \
+	    tests/model/test_density_64.c \
 	    lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
 	    -framework Accelerate -lm -o /tmp/lrm_test_density
@@ -199,7 +198,7 @@ test-density:
 test-density-sparse:
 	@echo "Building sparse-vs-dense density parity test..."
 	@$(CC) $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK \
-	    tests/test_density_sparse.c \
+	    tests/geometry/test_density_sparse.c \
 	    lrm/lrm_density.c lrm/lrm_triplane_sample.c lrm/lrm_nerf_mlp.c \
 	    lrm/lrm_marching_cubes.c \
 	    iris.c iris_kernels.c iris_safetensors.c \
@@ -210,7 +209,7 @@ test-density-sparse:
 test-mc:
 	@echo "Building marching cubes parity test..."
 	@$(CC) $(CFLAGS_BASE) \
-	    tests/test_marching_cubes.c lrm/lrm_marching_cubes.c iris.c \
+	    tests/geometry/test_marching_cubes.c lrm/lrm_marching_cubes.c iris.c \
 	    -lm -o /tmp/lrm_test_mc
 	@/tmp/lrm_test_mc
 	@rm -f /tmp/lrm_test_mc
@@ -218,7 +217,7 @@ test-mc:
 test-glb:
 	@echo "Building GLB writer test..."
 	@$(CC) $(CFLAGS_BASE) -D_DARWIN_C_SOURCE -D_GNU_SOURCE \
-	    tests/test_glb.c lrm/lrm_mesh_export.c iris.c \
+	    tests/geometry/test_glb.c lrm/lrm_mesh_export.c iris.c \
 	    -lm -o /tmp/lrm_test_glb
 	@/tmp/lrm_test_glb
 	@if [ -x triposr_env/.venv/bin/python ]; then \
@@ -253,14 +252,6 @@ test-e2e-tex: blas
 	fi
 	@echo ""
 	@echo "PASS  end-to-end textured inference (/tmp/lrm_e2e_tex.glb)"
-
-pngtest:
-	@echo "Running PNG compression compare test..."
-	@$(CC) $(CFLAGS_BASE) -I. png_compare.c iris_image.c iris.c -lm -o /tmp/lrm_png_compare
-	@/tmp/lrm_png_compare images/woman_with_sunglasses.png images/woman_with_sunglasses_compressed2.png
-	@/tmp/lrm_png_compare images/cat_uncompressed.png images/cat_compressed.png
-	@rm -f /tmp/lrm_png_compare
-	@echo "PNG TEST PASSED"
 
 install: $(TARGET) $(LIB)
 	install -d /usr/local/bin

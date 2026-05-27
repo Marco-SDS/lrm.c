@@ -51,8 +51,8 @@ iris_kernels.c/.h    - CPU compute primitives (matmul, attention, conv2d,
 iris_metal.m/.h      - Metal runtime (kept; kernels TBD in Phase 13)
 iris_shaders.metal   - Metal compute shaders (kept; trimmed in Phase 13)
 iris_safetensors.c/.h - mmap'd weight loader (zero-copy)
-iris_image.c         - PNG/JPEG/PPM image I/O
-png.c/.h jpeg.c/.h   - codec headers (vendored single-file libs)
+iris_image.c         - PNG (inline) / JPEG / PPM image I/O
+jpeg.c/.h            - JPEG decoder (vendored single-file lib)
 main.c               - CLI entry point
 
 lrm/                 - ALL LRM-specific code
@@ -63,23 +63,33 @@ lrm/                 - ALL LRM-specific code
   lrm_triplane_upsample.c/.h   - ConvTranspose2d via packed GEMM + pixel shuffle
   lrm_triplane_sample.c/.h     - per-point bilinear sampling, 3 planes -> 120-d
   lrm_nerf_mlp.c/.h            - 10-layer NeRF MLP (density + RGB)
-  lrm_marching_cubes.c/.h      - Lorensen-Cline MC + global-edge dedup
+  lrm_density.c/.h             - dense + coarse-to-fine MC density grid builders
+  lrm_marching_cubes.c/.h      - Lorensen-Cline MC + dedup + floater removal
   lrm_mesh_export.c/.h         - binary glTF 2.0 writer (PBR material, normals)
+  lrm_bake_texture.c/.h        - per-triangle UV atlas + NeRF texel bake
 
-tests/               - parity tests per module
-  test_kernels.c
-  test_vit_dino.c
-  test_triplane_decoder.c
-  test_triplane_upsample.c
-  test_density_64.c
-  test_marching_cubes.c
-  test_glb.c
+tests/               - test suite, split by concern
+  model/             - numerical parity vs the PyTorch reference
+    test_kernels.c
+    test_vit_dino.c
+    test_triplane_decoder.c
+    test_triplane_upsample.c
+    test_density_64.c          (sampler + NeRF MLP)
+  geometry/          - mesh-construction correctness
+    test_density_sparse.c      (coarse-to-fine vs dense MC, bit-identical)
+    test_marching_cubes.c      (structural parity + floater removal)
+    test_glb.c                 (GLB writer structure)
   golden/triposr/    - pinned reference goldens (gitignored)
 
 tools/               - dev-time Python helpers (NOT in hot path)
   ckpt_to_safetensors.py
   extract_golden.py
   check_glb.py
+
+debug/               - debugging aids for the lrm pipeline
+  debug_stage_compare.py       (inspect / diff a stage tensor vs golden)
+  debug_mesh.py                (GLB geometry diagnostics: orientation,
+                                normals, floaters, degenerate faces)
 
 docs/                - architectural reference + dev guide
   ARCHITECTURE.md

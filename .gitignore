@@ -2,22 +2,19 @@
 *.o
 lrm/*.o
 
-# Compiled binaries
+# Compiled binary
 lrmc
-flux
-iris
 
-# Model weights (large files)
-flux-klein-*/
-zimage-*/
+# Static / shared libraries
+*.a
+*.so
+*.dylib
 
-# Tokens and planning docs
+# Generated Metal shader source header (regenerated from iris_shaders.metal)
+iris_shaders_source.h
+
+# Secrets
 hf_token.txt
-9B.md
-
-# Misc directories (tests, images, utilities, markdown files)
-misc/
-documents/
 
 # IDE and editor files
 .vscode/
@@ -27,16 +24,8 @@ documents/
 .DS_Store
 Thumbs.db
 
-# Build artifacts
-*.a
-*.so
-*.dylib
-
-# LRM reference Python environment and weights (never commit)
+# LRM reference Python environment and weights (never commit; ~5 GB deps + 1.7 GB weights)
 triposr_env/
-flux_env/
-flux2/
-weights/
 *.ckpt
 *.safetensors
 
